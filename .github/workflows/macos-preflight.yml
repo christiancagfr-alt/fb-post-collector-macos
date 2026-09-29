@@ -1,0 +1,15 @@
+name: macOS build preflight
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify macOS build host
+        run: |
+          uname -m
+          sw_vers
+          xcodebuild -version
