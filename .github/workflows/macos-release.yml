@@ -18,10 +18,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     env:
-      FB_COLLECTOR_DATA_DIR: ${{ runner.temp }}/collector-test-data
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
+      - name: Isolate test data
+        run: echo "FB_COLLECTOR_DATA_DIR=$RUNNER_TEMP/collector-test-data" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
