@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card shadow-sm">
+  <div class="card-body">
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+      <div>
+        <h1 class="h3 mb-1">检查更新</h1>
+        <div class="text-secondary">当前版本：v{{ app_version }}</div>
+      </div>
+      <button class="btn btn-primary" id="check-update" type="button">重新检查</button>
+    </div>
+
+    <div id="update-loading" class="py-5 text-center">
+      <div class="spinner-border text-primary mb-3" role="status" aria-hidden="true"></div>
+      <div class="fw-semibold">正在连接 GitHub 检查新版本...</div>
+    </div>
+    <div id="update-error" class="alert alert-danger d-none" role="alert"></div>
+    <div id="update-result" class="d-none">
+      <div id="update-summary" class="alert"></div>
+      <dl class="row mb-3">
+        <dt class="col-sm-3">当前版本</dt><dd class="col-sm-9" id="current-version"></dd>
+        <dt class="col-sm-3">最新版本</dt><dd class="col-sm-9" id="latest-version"></dd>
+        <dt class="col-sm-3">发布时间</dt><dd class="col-sm-9" id="published-at"></dd>
+      </dl>
+      <div class="d-flex flex-wrap gap-2 mb-3" id="download-assets"></div>
+      <div id="auto-update-box" class="d-none mb-4">
+        <button class="btn btn-success" id="auto-update" type="button">立即自动更新并重启</button>
+        <div class="form-text">下载官方安装包后会自动覆盖当前版本，无需再手动安装。</div>
+      </div>
+      <div id="update-progress" class="d-none mb-3">
+        <div class="progress mb-2" role="progressbar">
+          <div class="progress-bar" id="update-progress-bar" style="width: 0%">0%</div>
+        </div>
+        <pre class="bg-dark text-light small p-3 rounded" id="update-log" style="max-height: 200px; overflow: auto; white-space: pre-wrap;"></pre>
+      </div>
+      <h2 class="h5">更新说明</h2>
+      <pre class="bg-light border rounded p-3 text-wrap" id="release-notes"></pre>
+    </div>
+  </div>
+</section>
+
+<script>
+const checkButton = document.querySelector("#check-update");
+const loading = document.querySelector("#update-loading");
+const result = document.querySelector("#update-result");
+const errorBox = document.querySelector("#update-error");
+
+function formatSize(bytes) {
+  const size = Number(bytes || 0);
+  return size ? `${(size / 1024 / 1024).toFixed(1)} MB` : "";
+}
+
+async function checkUpdate(force = false) {
+  loading.classList.remove("d-none");
+  result.classList.add("d-none");
+  errorBox.classList.add("d-none");
+  checkButton.disabled = true;
+  try {
+    const response = await fetch(`{{ url_for('api_update_check') }}${force ? "?force=1" : ""}`, { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "检查更新失败");
+    document.querySelector("#current-version").textContent = `v${data.current_version}`;
+    document.querySelector("#latest-version").textContent = `v${data.latest_version}`;
+    document.querySelector("#published-at").textContent = data.published_at || "";
+    document.querySelector("#release-notes").textContent = data.release_notes || "暂无更新说明";
+    const summary = document.querySelector("#update-summary");
+    summary.className = `alert ${data.update_available ? "alert-warning" : "alert-success"}`;
+    summary.textContent = data.update_available ? `发现新版本 v${data.latest_version}` : "当前已经是最新版本";
+    const downloads = document.querySelector("#download-assets");
+    downloads.replaceChildren();
+    (data.assets || []).forEach((asset) => {
+      const link = document.createElement("a");
+      link.className = asset.kind === "EXE" ? "btn btn-success" : "btn btn-outline-success";
+      link.href = asset.url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = `下载 ${asset.kind} 安装包 ${formatSize(asset.size)}`;
+      downloads.appendChild(link);
+    });
+    const releaseLink = document.createElement("a");
+    releaseLink.className = "btn btn-outline-primary";
+    releaseLink.href = data.release_url;
+    releaseLink.target = "_blank";
+    releaseLink.rel = "noopener";
+    releaseLink.textContent = "查看 GitHub Release";
+    downloads.appendChild(releaseLink);
+    const autoBox = document.querySelector("#auto-update-box");
+    autoBox.classList.toggle("d-none", !data.can_auto_update);
+    result.classList.remove("d-none");
+  } catch (error) {
+    errorBox.textContent = error.message || "检查更新失败，请确认网络连接。";
+    errorBox.classList.remove("d-none");
+  } finally {
+    loading.classList.add("d-none");
+    checkButton.disabled = false;
+  }
+}
+
+let updateTimer = null;
+
+function renderUpdateProgress(state) {
+  const box = document.querySelector("#update-progress");
+  const bar = document.querySelector("#update-progress-bar");
+  const log = document.querySelector("#update-log");
+  const autoButton = document.querySelector("#auto-update");
+  if (!state || state.status === "idle") return;
+  box.classList.remove("d-none");
+  const pct = Number(state.progress || 0);
+  bar.style.width = `${pct}%`;
+  bar.textContent = `${pct}%`;
+  log.textContent = (state.logs || []).join("\n");
+  log.scrollTop = log.scrollHeight;
+  if (autoButton) autoButton.disabled = state.status === "running" || state.status === "restarting";
+  if (state.status === "restarting") {
+    document.querySelector("#update-summary").textContent = "正在安装新版本，软件即将自动重启...";
+  }
+}
+
+async function pollUpdate() {
+  try {
+    const response = await fetch("{{ url_for('api_update_status') }}", { cache: "no-store" });
+    const data = await response.json();
+    renderUpdateProgress(data);
+    if (data.status === "running" || data.status === "restarting") {
+      if (!updateTimer) updateTimer = setInterval(pollUpdate, 1000);
+    } else if (updateTimer) {
+      clearInterval(updateTimer);
+      updateTimer = null;
+    }
+  } catch (error) {
+    if (updateTimer) {
+      clearInterval(updateTimer);
+      updateTimer = null;
+    }
+  }
+}
+
+async function startAutoUpdate() {
+  const autoButton = document.querySelector("#auto-update");
+  autoButton.disabled = true;
+  document.querySelector("#update-progress").classList.remove("d-none");
+  try {
+    const response = await fetch("{{ url_for('api_update_start') }}", { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "无法开始自动更新");
+    renderUpdateProgress(data);
+    await pollUpdate();
+  } catch (error) {
+    document.querySelector("#update-error").textContent = error.message || "自动更新失败";
+    document.querySelector("#update-error").classList.remove("d-none");
+    autoButton.disabled = false;
+  }
+}
+
+checkButton.addEventListener("click", () => checkUpdate(true));
+document.addEventListener("click", (event) => {
+  if (event.target.id === "auto-update") startAutoUpdate();
+});
+checkUpdate(false);
+</script>
+{% endblock %}

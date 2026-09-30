@@ -1,0 +1,11 @@
+FB贴文数据采集 1.4.17 — macOS 测试版
+
+系统要求：macOS 15 或以上。arm64 用于 Apple 芯片，x86_64 用于 Intel。
+打开 DMG，将 FBPostCollector 拖到 Applications 后启动。
+软件会打开浏览器管理页面，退出请使用菜单栏图标中的“退出软件”。
+主程序包含 Python，不需要另行安装 Python。
+请自行安装 Google Chrome。OCR、视频及语音组件为按需安装，需先从 https://brew.sh 安装 Homebrew，再在“环境检测”安装所需组件。
+用户数据保存在 ~/Library/Application Support/FBPostCollector，不随覆盖安装删除。
+此测试版未使用 Apple Developer ID 签名或公证，macOS 可能阻止首次打开。
+已执行自动化测试及打包服务启动检查；尚未在真实 Facebook/Google 账号上完成 Mac 端到端验证。
+不要将 Windows 的浏览器配置文件复制到 Mac，请重新登录账号。

@@ -1,0 +1,53 @@
+name: Build macOS installers
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      FB_COLLECTOR_DATA_DIR: ${{ runner.temp }}/collector-test-data
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Build application
+        run: python -m PyInstaller --clean --noconfirm FBPostCollector-macos.spec
+      - name: Verify application
+        run: |
+          codesign --verify --deep --strict dist/FBPostCollector.app
+          python scripts/smoke_macos.py
+      - name: Create DMG
+        run: |
+          mkdir -p dmg-stage installer_output
+          cp -R dist/FBPostCollector.app dmg-stage/
+          ln -s /Applications dmg-stage/Applications
+          cp MAC_INSTALL.txt dmg-stage/
+          hdiutil create -volname FBPostCollector -srcfolder dmg-stage -ov -format UDZO installer_output/FBPostCollector-v1.4.17-macos-${{ matrix.arch }}.dmg
+          cd installer_output
+          shasum -a 256 *.dmg > SHA256-${{ matrix.arch }}.txt
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: installer_output/*.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: installer_output/*

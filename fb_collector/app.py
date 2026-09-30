@@ -1,0 +1,1015 @@
+import json
+import logging
+import os
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from datetime import datetime, timezone
+from pathlib import Path
+
+from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
+
+from . import db
+from .project_transfer import export_project, validate_import
+from .services import drive_storage
+from .services.account_status import record_status
+from .config import APP_VERSION, BASE_DIR, DATA_DIR
+from .fields import assign_default_write_columns, normalize_column
+from .runner import request_pause, request_resume, request_stop, run_project, running_status, PROFILE_LOCKS
+from .scheduler import SchedulerThread, next_run
+from .services.browser_profiles import account_debug_port, chrome_executable
+from .services.environment import detect_tools
+from .services.errors import LoginRequiredError, UserVisibleError
+from .services.rate_limit import FACEBOOK_GRAPHQL_DAILY_LIMIT, local_usage_date
+from .services.scraper import facebook_logged_in, login_check_driver
+from .services.sheets import (
+    clear_google_oauth,
+    extract_spreadsheet_id,
+    google_auth_status,
+    run_google_oauth,
+    save_uploaded_google_credentials,
+)
+from .services.translator import (
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_GROQ_MODEL,
+    DEFAULT_GROQ_VISION_MODEL,
+    clear_translation_cache,
+    parse_api_keys,
+    test_translation_service,
+)
+from .services.component_installer import TESSERACT_MANUAL_LINKS, installation_status, start_installation
+from .services.update_checker import auto_update_status, check_for_update, start_auto_update
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+WHISPER_LANGUAGE_OPTIONS = [
+    ("", "自动识别"),
+    ("en", "英语"),
+    ("zh", "中文"),
+    ("de", "德语"),
+    ("es", "西班牙语"),
+    ("ru", "俄语"),
+    ("ko", "韩语"),
+    ("fr", "法语"),
+    ("ja", "日语"),
+    ("pt", "葡萄牙语"),
+    ("tr", "土耳其语"),
+    ("pl", "波兰语"),
+    ("ca", "加泰罗尼亚语"),
+    ("nl", "荷兰语"),
+    ("ar", "阿拉伯语"),
+    ("sv", "瑞典语"),
+    ("it", "意大利语"),
+    ("id", "印度尼西亚语"),
+    ("hi", "印地语"),
+    ("fi", "芬兰语"),
+    ("vi", "越南语"),
+    ("he", "希伯来语"),
+    ("uk", "乌克兰语"),
+    ("el", "希腊语"),
+    ("ms", "马来语"),
+    ("cs", "捷克语"),
+    ("ro", "罗马尼亚语"),
+    ("da", "丹麦语"),
+    ("hu", "匈牙利语"),
+    ("ta", "泰米尔语"),
+    ("no", "挪威语"),
+    ("th", "泰语"),
+    ("ur", "乌尔都语"),
+    ("hr", "克罗地亚语"),
+    ("bg", "保加利亚语"),
+    ("lt", "立陶宛语"),
+    ("la", "拉丁语"),
+    ("mi", "毛利语"),
+    ("ml", "马拉雅拉姆语"),
+    ("cy", "威尔士语"),
+    ("sk", "斯洛伐克语"),
+    ("te", "泰卢固语"),
+    ("fa", "波斯语"),
+    ("lv", "拉脱维亚语"),
+    ("bn", "孟加拉语"),
+    ("sr", "塞尔维亚语"),
+    ("az", "阿塞拜疆语"),
+    ("sl", "斯洛文尼亚语"),
+    ("kn", "卡纳达语"),
+    ("et", "爱沙尼亚语"),
+    ("mk", "马其顿语"),
+    ("br", "布列塔尼语"),
+    ("eu", "巴斯克语"),
+    ("is", "冰岛语"),
+    ("hy", "亚美尼亚语"),
+    ("ne", "尼泊尔语"),
+    ("mn", "蒙古语"),
+    ("bs", "波斯尼亚语"),
+    ("kk", "哈萨克语"),
+    ("sq", "阿尔巴尼亚语"),
+    ("sw", "斯瓦希里语"),
+    ("gl", "加利西亚语"),
+    ("mr", "马拉地语"),
+    ("pa", "旁遮普语"),
+    ("si", "僧伽罗语"),
+    ("km", "高棉语"),
+    ("sn", "绍纳语"),
+    ("yo", "约鲁巴语"),
+    ("so", "索马里语"),
+    ("af", "南非荷兰语"),
+    ("oc", "奥克语"),
+    ("ka", "格鲁吉亚语"),
+    ("be", "白俄罗斯语"),
+    ("tg", "塔吉克语"),
+    ("sd", "信德语"),
+    ("gu", "古吉拉特语"),
+    ("am", "阿姆哈拉语"),
+    ("yi", "意第绪语"),
+    ("lo", "老挝语"),
+    ("uz", "乌兹别克语"),
+    ("fo", "法罗语"),
+    ("ht", "海地克里奥尔语"),
+    ("ps", "普什图语"),
+    ("tk", "土库曼语"),
+    ("nn", "新挪威语"),
+    ("mt", "马耳他语"),
+    ("sa", "梵语"),
+    ("lb", "卢森堡语"),
+    ("my", "缅甸语"),
+    ("bo", "藏语"),
+    ("tl", "他加禄语"),
+    ("mg", "马达加斯加语"),
+    ("as", "阿萨姆语"),
+    ("tt", "鞑靼语"),
+    ("haw", "夏威夷语"),
+    ("ln", "林加拉语"),
+    ("ha", "豪萨语"),
+    ("ba", "巴什基尔语"),
+    ("jw", "爪哇语"),
+    ("su", "巽他语"),
+    ("yue", "粤语"),
+]
+OCR_LANGUAGE_OPTIONS = [
+    ("por", "葡萄牙语"),
+    ("eng", "英文"),
+    ("ara", "阿拉伯语"),
+    ("chi_sim", "中文简体"),
+    ("swa", "斯瓦希里语"),
+    ("fra", "法语"),
+    ("Latin", "马达加斯加语（通用拉丁文字）"),
+]
+
+
+def create_app():
+    db.init_db()
+    drive_storage.init_storage()
+    app = Flask(__name__)
+    app.config["JSON_AS_ASCII"] = False
+    app.secret_key = "fb-post-collector-local-dev"
+
+    @app.route("/")
+    def index():
+        return render_template("index.html", projects=db.list_projects(), tasks=db.list_tasks(), runs=db.list_runs(10))
+
+    @app.route("/api/ping")
+    def api_ping():
+        return jsonify({"ok": True, "version": APP_VERSION})
+
+    @app.route("/drive-accounts", methods=["GET", "POST"])
+    def drive_accounts():
+        if request.method == "POST":
+            try:
+                if request.form.get("action") == "client":
+                    upload = request.files.get("credentials")
+                    if not upload:
+                        raise ValueError("请选择 OAuth JSON 文件")
+                    drive_storage.save_client(upload)
+                    flash("云盘 OAuth 配置已保存。现在可以添加 Google 账号。", "success")
+                else:
+                    provider = request.form.get("provider", "drive")
+                    if provider not in {"drive", "gyazo"}:
+                        raise ValueError("上传方式无效")
+                    db.setting_set("image_storage_provider", provider)
+                    db.setting_set("drive_public_links", "1" if request.form.get("public_links") == "on" else "0")
+                    flash("图片上传设置已保存。", "success")
+            except ValueError as exc:
+                flash(str(exc), "danger")
+            return redirect(url_for("drive_accounts"))
+        return render_template("drive_accounts.html", accounts=drive_storage.accounts(),
+                               provider=db.setting_get("image_storage_provider", "gyazo"),
+                               public_links=db.setting_get("drive_public_links", "0") == "1")
+
+    @app.route("/drive-accounts/login", methods=["POST"])
+    def drive_login():
+        try:
+            drive_storage.start_login()
+            return jsonify(drive_storage.login_status()), 202
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.route("/drive-accounts/status")
+    def drive_status():
+        return jsonify({"accounts": drive_storage.accounts(), "login": drive_storage.login_status()})
+
+    @app.route("/drive-accounts/<int:account_id>/<action>", methods=["POST"])
+    def drive_account_action(account_id, action):
+        try:
+            if action == "check":
+                drive_storage.check_account(account_id)
+            elif action in {"remove", "toggle"}:
+                drive_storage.change_account(account_id, action)
+            else:
+                return jsonify({"error": "未知操作"}), 400
+            return jsonify({"ok": True})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 404
+
+    @app.route("/browser-accounts/status")
+    def browser_accounts_status():
+        return jsonify([{key: account.get(key) for key in ("id", "facebook_login_status", "last_checked_at", "avatar_url")}
+                        for account in db.list_browser_accounts()])
+
+    @app.route("/browser-accounts")
+    def browser_accounts():
+        return render_template("browser_accounts.html", accounts=browser_accounts_with_usage())
+
+    @app.route("/browser-accounts/new", methods=["POST"])
+    def browser_account_new():
+        account_id = db.create_browser_account(request.form.get("name") or "抓取账号")
+        flash("已创建抓取浏览器账号。请点击“打开登录”并在专用 Chrome 中登录 Facebook。", "success")
+        return redirect(url_for("browser_accounts"))
+
+    @app.route("/browser-accounts/<int:account_id>", methods=["POST"])
+    def browser_account_update(account_id):
+        data = {
+            "name": request.form.get("name") or "抓取账号",
+            "browser_type": request.form.get("browser_type") or "chrome",
+            "user_data_dir": request.form.get("user_data_dir") or db.default_browser_account_dir(account_id),
+            "debug_enabled": 1 if request.form.get("debug_enabled") == "on" else 0,
+            "notes": request.form.get("notes") or "",
+        }
+        db.update_browser_account(account_id, data)
+        flash("已保存浏览器账号。", "success")
+        return redirect(url_for("browser_accounts", check=account_id))
+
+    @app.route("/browser-accounts/<int:account_id>/delete", methods=["POST"])
+    def browser_account_delete(account_id):
+        db.delete_browser_account(account_id)
+        flash("已删除浏览器账号，已绑定该账号的项目会变为未绑定。", "success")
+        return redirect(url_for("browser_accounts"))
+
+    @app.route("/browser-accounts/<int:account_id>/open", methods=["POST"])
+    def browser_account_open(account_id):
+        account = db.get_browser_account(account_id)
+        if not account:
+            flash("浏览器账号不存在。", "danger")
+            return redirect(url_for("browser_accounts"))
+        try:
+            open_browser_account(account, "https://www.facebook.com/")
+            flash("已打开该账号的专用 Chrome。请在里面登录 Facebook，登录完成后可以直接点“检测登录”，不用先关窗口。", "success")
+        except Exception:
+            LOGGER.exception("Failed to open browser account %s", account_id)
+            flash("打开浏览器失败，请查看软件日志。", "danger")
+        return redirect(url_for("browser_accounts"))
+
+    @app.route("/browser-accounts/<int:account_id>/check", methods=["POST"])
+    def browser_account_check(account_id):
+        if PROFILE_LOCKS.get(f"browser_account|{account_id}"):
+            return jsonify({"error": "账号正在抓取中，登录状态会随抓取更新；请暂停并结束当前浏览器任务后再检测。"}), 409
+        account = db.get_browser_account(account_id)
+        if not account:
+            if wants_json():
+                return jsonify({"error": "浏览器账号不存在。"}), 404
+            flash("浏览器账号不存在。", "danger")
+            return redirect(url_for("browser_accounts"))
+        status, message = check_facebook_login(account)
+        checked_at = db.utc_now()
+        db.update_browser_account(
+            account_id,
+            {
+                "facebook_login_status": status,
+                "last_checked_at": checked_at,
+            },
+        )
+        if wants_json():
+            return jsonify(
+                {
+                    "id": account_id,
+                    "status": status,
+                    "message": message,
+                    "last_checked_at": checked_at,
+                }
+            )
+        flash(message, "success" if status == "logged_in" else "warning")
+        return redirect(url_for("browser_accounts"))
+
+    @app.route("/projects/new", methods=["POST"])
+    def project_new():
+        project_id = db.create_project(
+            request.form.get("name") or "新项目",
+            request.form.get("project_type") or "post",
+        )
+        return redirect(url_for("project_edit", project_id=project_id))
+
+    @app.route("/projects/<int:project_id>/export")
+    def project_export(project_id):
+        project = db.get_project(project_id)
+        if not project:
+            return "项目不存在", 404
+        response = app.response_class(json.dumps(export_project(project), ensure_ascii=False, indent=2), mimetype="application/json")
+        response.headers["Content-Disposition"] = f'attachment; filename="project-{project_id}.json"'
+        return response
+
+    @app.route("/projects/import", methods=["POST"])
+    def project_import():
+        upload = request.files.get("project_file")
+        try:
+            if not upload:
+                raise ValueError("请选择项目 JSON 文件")
+            content = upload.read(1024 * 1024 + 1)
+            if len(content) > 1024 * 1024:
+                raise ValueError("项目文件不能超过 1 MB")
+            data, fields = validate_import(json.loads(content.decode("utf-8-sig")))
+            data = normalize_project_form(data, [])
+        except (ValueError, TypeError, UnicodeError):
+            flash("导入失败：文件格式或配置值无效，请使用本软件导出的项目 JSON（最大 1 MB）。", "danger")
+            return redirect(url_for("index"))
+        project_id = db.create_project(data["name"], data["project_type"])
+        try:
+            db.update_project(project_id, data)
+            if fields:
+                db.update_project_fields(project_id, fields)
+        except Exception:
+            db.delete_project(project_id)
+            raise
+        flash("已导入为新项目。请重新选择本机浏览器账号，确认表格授权及执行范围；账号密钥和断点不随项目导入。", "success")
+        return redirect(url_for("project_edit", project_id=project_id))
+
+    @app.route("/projects/<int:project_id>/copy", methods=["POST"])
+    def project_copy(project_id):
+        new_id = db.copy_project(project_id)
+        if not new_id:
+            flash("项目不存在，无法复制。", "warning")
+            return redirect(url_for("index"))
+        flash("已复制项目配置，可直接修改后使用。", "success")
+        return redirect(url_for("project_edit", project_id=new_id))
+
+    @app.route("/projects/<int:project_id>")
+    def project_edit(project_id):
+        project = db.get_project(project_id)
+        if not project:
+            return redirect(url_for("index"))
+        return render_template(
+            "project.html",
+            project=project,
+            browser_accounts=browser_accounts_with_usage(),
+            whisper_language_options=WHISPER_LANGUAGE_OPTIONS,
+            ocr_language_options=OCR_LANGUAGE_OPTIONS,
+        )
+
+    @app.route("/projects/<int:project_id>", methods=["POST"])
+    def project_save(project_id):
+        db.init_db()
+        project = db.get_project(project_id)
+        if not project:
+            return redirect(url_for("index"))
+        data = normalize_project_form(dict(request.form), request.form.getlist("browser_account_ids"))
+        data["project_type"] = project.get("project_type") or "post"
+        if data.get("spreadsheet_url"):
+            data["spreadsheet_id"] = extract_spreadsheet_id(data["spreadsheet_url"])
+        db.update_project(project_id, data)
+        fields = json.loads(request.form.get("fields_json", "[]"))
+        if data.get("project_type") == "page":
+            for field in fields:
+                if field.get("field_key") == "post_url":
+                    field["enabled"] = True
+        if fields:
+            for field in fields:
+                field["write_column"] = normalize_column(field.get("write_column"))
+            assign_default_write_columns(fields, data.get("write_start_column") or "B")
+            db.update_project_fields(project_id, fields)
+        saved = db.get_project(project_id)
+        if not saved:
+            flash("项目保存失败，请重新打开项目后再试。", "danger")
+        elif str(saved.get("audio_min_like_count") or 0) != str(data.get("audio_min_like_count") or 0):
+            flash("项目已保存，但音频识别点赞门槛没有写入成功，请重启软件后再试。", "warning")
+        elif not data.get("browser_account_id"):
+            flash("项目配置已保存。运行前请先选择一个抓取浏览器账号。", "warning")
+        else:
+            flash("项目已保存。", "success")
+        return redirect(url_for("project_edit", project_id=project_id))
+
+    @app.route("/projects/<int:project_id>/delete", methods=["POST"])
+    def project_delete(project_id):
+        db.delete_project(project_id)
+        return redirect(url_for("index"))
+
+    @app.route("/projects/<int:project_id>/run", methods=["POST"])
+    def project_run(project_id):
+        if request.form.get("from_start") == "1":
+            db.set_resume_row(project_id, 0)
+        run_id = db.create_task_run(project_id, None)
+        thread = threading.Thread(
+            target=run_project,
+            args=(project_id, None, request.form.get("policy", "")),
+            kwargs={"run_id": run_id},
+            daemon=True,
+        )
+        thread.start()
+        return redirect(url_for("run_detail", run_id=run_id))
+
+    @app.route("/tasks")
+    def tasks():
+        return render_template("tasks.html", tasks=db.list_tasks(), projects=db.list_projects())
+
+    @app.route("/tasks/new", methods=["POST"])
+    def task_new():
+        data = task_form_data(request.form)
+        db.create_task(data)
+        return redirect(url_for("tasks"))
+
+    @app.route("/tasks/<int:task_id>", methods=["POST"])
+    def task_update(task_id):
+        db.update_task(task_id, task_form_data(request.form))
+        return redirect(url_for("tasks"))
+
+    @app.route("/tasks/<int:task_id>/delete", methods=["POST"])
+    def task_delete(task_id):
+        db.delete_task(task_id)
+        return redirect(url_for("tasks"))
+
+    @app.route("/runs")
+    def runs():
+        return render_template("runs.html", runs=db.list_runs(100), running=running_status())
+
+    @app.route("/runs/<int:run_id>")
+    def run_detail(run_id):
+        return render_template("run_detail.html", rows=db.list_row_runs(run_id), run_id=run_id, run=db.get_run(run_id))
+
+    @app.route("/runs/clear-failed", methods=["POST"])
+    def runs_clear_failed():
+        deleted = db.delete_failed_runs()
+        if wants_json():
+            return jsonify({"deleted": deleted})
+        flash(f"已清空 {deleted} 条失败运行记录。", "success")
+        return redirect(url_for("runs"))
+
+    @app.route("/runs/<int:run_id>/stop", methods=["POST"])
+    def run_stop(run_id):
+        run = db.get_run(run_id)
+        if run and run.get("status") in {"running", "paused", "stopping"}:
+            request_stop(run_id)
+            flash("已请求停止，当前贴文处理完成后会停止。", "warning")
+        return redirect(url_for("run_detail", run_id=run_id))
+
+    @app.route("/runs/<int:run_id>/pause", methods=["POST"])
+    def run_pause(run_id):
+        run = db.get_run(run_id)
+        if run and run.get("status") == "running":
+            request_pause(run_id)
+            flash("已暂停领取新行；正在处理的贴文会先完成。", "info")
+        return redirect(url_for("run_detail", run_id=run_id))
+
+    @app.route("/runs/<int:run_id>/resume", methods=["POST"])
+    def run_resume(run_id):
+        run = db.get_run(run_id)
+        if run and run.get("status") == "paused":
+            request_resume(run_id)
+            flash("任务已继续运行。", "success")
+        return redirect(url_for("run_detail", run_id=run_id))
+
+    @app.route("/environment")
+    def environment():
+        return render_template("environment.html")
+
+    @app.route("/updates")
+    def updates():
+        return render_template("updates.html")
+
+    @app.route("/api/update-check")
+    def api_update_check():
+        try:
+            force = request.args.get("force") == "1"
+            return jsonify(check_for_update(force=force))
+        except Exception:
+            LOGGER.exception("Update check failed")
+            return jsonify(
+                {
+                    "ok": False,
+                    "current_version": APP_VERSION,
+                    "error": "检查更新失败，请确认网络连接后重试。",
+                }
+            ), 502
+
+    @app.route("/api/update/start", methods=["POST"])
+    def api_update_start():
+        try:
+            return jsonify(start_auto_update()), 202
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc), "update": auto_update_status()}), 409
+        except Exception:
+            LOGGER.exception("Auto update failed to start")
+            return jsonify({"error": "无法开始自动更新。"}), 500
+
+    @app.route("/api/update/status")
+    def api_update_status():
+        return jsonify(auto_update_status())
+
+    @app.route("/environment/data")
+    def environment_data():
+        force = request.args.get("force") == "1"
+        return jsonify(
+            {
+                "tools": detect_tools(force=force),
+                "browser_accounts": db.list_browser_accounts(),
+                "installation": installation_status(),
+                "download_links": {"tesseract": TESSERACT_MANUAL_LINKS},
+            }
+        )
+
+    @app.route("/environment/install", methods=["POST"])
+    def environment_install():
+        payload = request.get_json(silent=True) or {}
+        try:
+            state = start_installation(payload.get("components") or [])
+            return jsonify(state), 202
+        except ValueError:
+            return jsonify({"error": "安装组件请求无效。"}), 400
+        except RuntimeError:
+            return jsonify({"error": "组件安装正在进行中，请稍后重试。", "installation": installation_status()}), 409
+
+    @app.route("/environment/install/status")
+    def environment_install_status():
+        return jsonify(installation_status())
+
+    @app.route("/settings", methods=["GET", "POST"])
+    def settings():
+        if request.method == "POST":
+            if "gyazo_access_token" in request.form:
+                db.setting_set("gyazo_access_token", request.form.get("gyazo_access_token", ""))
+                flash("Gyazo Token 已保存。", "success")
+            if "translation_provider" in request.form:
+                provider = request.form.get("translation_provider", "auto")
+                if provider not in {"auto", "groq", "gemini", "free"}:
+                    provider = "auto"
+                db.setting_set("translation_provider", provider)
+                db.setting_set("groq_model", request.form.get("groq_model", "").strip() or DEFAULT_GROQ_MODEL)
+                db.setting_set("groq_vision_model", request.form.get("groq_vision_model", "").strip() or DEFAULT_GROQ_VISION_MODEL)
+                db.setting_set("gemini_model", request.form.get("gemini_model", "").strip() or DEFAULT_GEMINI_MODEL)
+                db.setting_set("ai_ocr_enabled", "1" if request.form.get("ai_ocr_enabled") == "1" else "0")
+                for key_provider in ("groq", "gemini"):
+                    plural_name = f"{key_provider}_api_keys"
+                    legacy_name = f"{key_provider}_api_key"
+                    if request.form.get(f"clear_{plural_name}") == "1":
+                        db.setting_set(plural_name, "")
+                        db.setting_set(legacy_name, "")
+                        continue
+                    existing = parse_api_keys(db.setting_get(plural_name, "") or db.setting_get(legacy_name, ""))
+                    additions = parse_api_keys(request.form.get(f"{plural_name}_add", ""))
+                    if additions:
+                        combined = parse_api_keys(existing + additions)
+                        db.setting_set(plural_name, "\n".join(combined))
+                        db.setting_set(legacy_name, "")
+                clear_translation_cache()
+                if request.form.get("action") == "test_translation":
+                    result = test_translation_service()
+                    if result["ok"]:
+                        flash(f"{result['provider']} 翻译测试成功：{result['text']}", "success")
+                    else:
+                        flash(f"{result['provider']} 翻译测试失败：{result['error']}", "danger")
+                else:
+                    flash("AI 翻译设置已保存。", "success")
+            return redirect(url_for("settings"))
+        groq_keys = parse_api_keys(db.setting_get("groq_api_keys", "") or db.setting_get("groq_api_key", ""))
+        gemini_keys = parse_api_keys(db.setting_get("gemini_api_keys", "") or db.setting_get("gemini_api_key", ""))
+        return render_template(
+            "settings.html",
+            gyazo_access_token=db.setting_get("gyazo_access_token"),
+            google_auth=google_auth_status(),
+            translation_provider=db.setting_get("translation_provider", "auto"),
+            groq_key_configured=bool(groq_keys),
+            gemini_key_configured=bool(gemini_keys),
+            groq_key_count=len(groq_keys),
+            gemini_key_count=len(gemini_keys),
+            groq_model=db.setting_get("groq_model", DEFAULT_GROQ_MODEL),
+            groq_vision_model=db.setting_get("groq_vision_model", DEFAULT_GROQ_VISION_MODEL),
+            gemini_model=db.setting_get("gemini_model", DEFAULT_GEMINI_MODEL),
+            ai_ocr_enabled=db.setting_get("ai_ocr_enabled", "0") == "1",
+        )
+
+    @app.context_processor
+    def template_helpers():
+        def status_label(status):
+            return {
+                "running": "运行中",
+                "paused": "已暂停",
+                "stopping": "正在停止",
+                "stopped": "已停止",
+                "success": "成功",
+                "finished_with_errors": "有错误",
+                "failed": "失败",
+                "skipped": "已跳过",
+            }.get(status or "", status or "")
+
+        def status_badge_class(status):
+            return {
+                "running": "text-bg-primary",
+                "paused": "text-bg-info",
+                "stopping": "text-bg-warning",
+                "stopped": "text-bg-secondary",
+                "success": "text-bg-success",
+                "finished_with_errors": "text-bg-danger",
+                "failed": "text-bg-danger",
+                "skipped": "text-bg-secondary",
+            }.get(status or "", "text-bg-secondary")
+
+        return {
+            "status_label": status_label,
+            "status_badge_class": status_badge_class,
+            "app_version": APP_VERSION,
+        }
+
+    @app.route("/auth/google/credentials", methods=["POST"])
+    def google_credentials_upload():
+        uploaded = request.files.get("credentials_file")
+        if not uploaded or not uploaded.filename:
+            flash("请先选择 Google 服务账号 JSON 文件。", "warning")
+            return redirect(url_for("settings"))
+        try:
+            info = save_uploaded_google_credentials(uploaded)
+            if info["type"] == "service_account":
+                flash(
+                    f"服务账号已保存并完成授权：{info['email']}。请把要写入的表格共享给这个邮箱（编辑者权限）。",
+                    "success",
+                )
+            else:
+                flash("OAuth 客户端文件已保存，请再点“登录 Google 账号”完成授权。", "success")
+        except ValueError as exc:
+            flash(str(exc), "danger")
+        except Exception:
+            LOGGER.exception("Failed to save Google credentials")
+            flash("保存凭据失败，请确认文件是有效的 JSON。", "danger")
+        return redirect(url_for("settings"))
+
+    @app.route("/auth/google/login", methods=["POST"])
+    def google_login():
+        try:
+            run_google_oauth()
+            flash("Google 授权成功。", "success")
+        except Exception:
+            LOGGER.exception("Google authorization failed")
+            flash("Google 授权失败，请检查网络和凭据配置。", "danger")
+        return redirect(url_for("settings"))
+
+    @app.route("/auth/google/logout", methods=["POST"])
+    def google_logout():
+        clear_google_oauth()
+        flash("已删除 Google 授权，可以重新选择服务账号文件。", "success")
+        return redirect(url_for("settings"))
+
+    @app.route("/api/status")
+    def api_status():
+        return jsonify({"version": APP_VERSION, "running": running_status(), "runs": db.list_runs(10)})
+
+    @app.route("/api/runs/live")
+    def api_runs_live():
+        return jsonify(live_runs_payload())
+
+    @app.route("/api/runs/<int:run_id>/live")
+    def api_run_live(run_id):
+        return jsonify(live_run_detail(run_id))
+
+    return app
+
+
+def logs_from_row_runs(rows):
+    logs = []
+    for row in rows:
+        status = row.get("status") or "info"
+        number = row.get("sheet_row_number")
+        url = row.get("post_url") or ""
+        error = row.get("user_error_message") or ""
+        if status == "success":
+            message = f"第 {number} 行抓取成功"
+        elif status == "skipped":
+            message = f"第 {number} 行跳过：{error}" if error else f"第 {number} 行已跳过"
+        elif status == "failed":
+            message = f"第 {number} 行失败：{error}" if error else f"第 {number} 行失败"
+        else:
+            message = error or f"第 {number} 行 {status}"
+        logs.append(
+            {
+                "time": row.get("finished_at") or row.get("started_at") or "",
+                "status": status,
+                "row_number": number,
+                "url": url,
+                "message": message,
+            }
+        )
+    return logs
+
+
+def serialize_run_row(run):
+    return {
+        "id": run.get("id"),
+        "project_name": run.get("project_name") or "",
+        "task_name": run.get("task_name") or "手动",
+        "status": run.get("status") or "",
+        "total_rows": run.get("total_rows") or 0,
+        "success_rows": run.get("success_rows") or 0,
+        "failed_rows": run.get("failed_rows") or 0,
+        "skipped_rows": run.get("skipped_rows") or 0,
+        "error_message": run.get("error_message") or "",
+        "started_at": run.get("started_at") or "",
+        "finished_at": run.get("finished_at") or "",
+    }
+
+
+def live_run_detail(run_id):
+    run = db.get_run(run_id)
+    if not run:
+        return {"error": "运行记录不存在"}
+    state = running_status().get(int(run_id)) or {}
+    rows = db.list_row_runs(run_id)
+    logs = state.get("logs") or logs_from_row_runs(rows)
+    counts = state.get("counts") or {
+        "total": run.get("total_rows") or 0,
+        "success": run.get("success_rows") or 0,
+        "failed": run.get("failed_rows") or 0,
+        "skipped": run.get("skipped_rows") or 0,
+    }
+    return {
+        "id": run_id,
+        "project_name": state.get("project_name") or "",
+        "status": state.get("status") or run.get("status") or "",
+        "message": state.get("message") or "",
+        "current_row": state.get("current_row"),
+        "current_url": state.get("current_url") or "",
+        "counts": counts,
+        "logs": logs[-200:],
+        "rows": [
+            {
+                "sheet_row_number": row.get("sheet_row_number"),
+                "post_url": row.get("post_url") or "",
+                "status": row.get("status") or "",
+                "user_error_message": row.get("user_error_message") or "",
+            }
+            for row in rows[-200:]
+        ],
+    }
+
+
+def live_runs_payload():
+    runs = [serialize_run_row(run) for run in db.list_runs(50)]
+    live_states = running_status()
+    active = None
+    live_ids = {
+        int(run_id)
+        for run_id, state in live_states.items()
+        if (state or {}).get("status") in {"running", "paused", "stopping"}
+    }
+    for run in runs:
+        if int(run["id"]) in live_ids or (run["status"] in {"running", "paused", "stopping"} and int(run["id"]) in live_states):
+            extra = live_run_detail(run["id"])
+            extra["project_name"] = extra.get("project_name") or run["project_name"]
+            active = extra
+            run["total_rows"] = extra["counts"].get("total", run["total_rows"])
+            run["success_rows"] = extra["counts"].get("success", run["success_rows"])
+            run["failed_rows"] = extra["counts"].get("failed", run["failed_rows"])
+            run["skipped_rows"] = extra["counts"].get("skipped", run["skipped_rows"])
+            run["status"] = extra.get("status") or run["status"]
+            break
+    if not active:
+        for run_id, state in live_states.items():
+            if (state or {}).get("status") in {"running", "paused", "stopping"}:
+                active = live_run_detail(int(run_id))
+                break
+    if not active and runs:
+        active = live_run_detail(runs[0]["id"])
+        active["project_name"] = active.get("project_name") or runs[0]["project_name"]
+    return {"runs": runs, "active": active}
+
+
+def open_browser_account(account, url):
+    user_data_dir = Path(account["user_data_dir"])
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    port = account_debug_port(account["id"])
+    subprocess.Popen(
+        [
+            chrome_executable(),
+            f"--user-data-dir={user_data_dir}",
+            f"--remote-debugging-port={port}",
+            "--remote-allow-origins=*",
+            "--no-first-run",
+            "--no-default-browser-check",
+            url,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def browser_accounts_with_usage():
+    usage_date = local_usage_date()
+    accounts = db.list_browser_accounts()
+    for account in accounts:
+        usage = db.get_graphql_usage(account["id"], usage_date)
+        used = int(usage.get("request_count") or 0)
+        remaining = max(FACEBOOK_GRAPHQL_DAILY_LIMIT - used, 0)
+        percent = min(round(used / FACEBOOK_GRAPHQL_DAILY_LIMIT * 100, 1), 100)
+        account["graphql_usage"] = {
+            "date": usage_date,
+            "used": used,
+            "limit": FACEBOOK_GRAPHQL_DAILY_LIMIT,
+            "remaining": remaining,
+            "percent": percent,
+            "is_limited": used >= FACEBOOK_GRAPHQL_DAILY_LIMIT,
+            "last_request_at": usage.get("last_request_at") or "",
+        }
+    return accounts
+
+
+def wants_json():
+    requested = (request.headers.get("X-Requested-With") or "").lower()
+    if requested in {"fetch", "xmlhttprequest"}:
+        return True
+    best = request.accept_mimetypes.best_match(["application/json", "text/html"])
+    return best == "application/json" and request.accept_mimetypes[best] >= request.accept_mimetypes["text/html"]
+
+
+def check_facebook_login(account):
+    driver = None
+    attached = False
+    try:
+        driver, attached = login_check_driver(account)
+        driver.get("https://www.facebook.com/")
+        time.sleep(3)
+        if facebook_logged_in(driver):
+            record_status(account["id"], "logged_in", driver)
+            return "logged_in", f"{account['name']} 已登录 Facebook。"
+        return "not_logged_in", f"{account['name']} 尚未登录 Facebook。请点击“打开登录”，登录完成后可以直接点“检测登录”，不用先关窗口。"
+    except LoginRequiredError:
+        return "not_logged_in", f"{account['name']} 尚未登录 Facebook。请点击“打开登录”。"
+    except UserVisibleError as exc:
+        return "unknown", exc.user_message
+    except Exception:
+        LOGGER.exception("Unable to check Facebook login for account %s", account.get("id"))
+        return "unknown", "无法确认登录状态，请查看软件日志后重试。"
+    finally:
+        if driver and not attached:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def task_form_data(form):
+    schedule_type = form.get("schedule_type", "manual")
+    config = {
+        "interval": int(form.get("interval") or 1),
+        "hour": int(form.get("hour") or 9),
+        "minute": int(form.get("minute") or 0),
+        "weekday": int(form.get("weekday") or 0),
+        "day": int(form.get("day") or 1),
+    }
+    next_at = form.get("next_run_at") or ""
+    if not next_at and schedule_type != "manual":
+        upcoming = next_run(schedule_type, config, datetime.now(timezone.utc))
+        next_at = upcoming.isoformat() if upcoming else None
+    return {
+        "project_id": int(form["project_id"]),
+        "name": form.get("name") or "任务",
+        "enabled": form.get("enabled") == "on",
+        "schedule_type": schedule_type,
+        "schedule_config": config,
+        "next_run_at": next_at,
+        "run_policy_override": form.get("run_policy_override", ""),
+    }
+
+
+def normalize_project_form(data, account_ids=None):
+    normalized_account_ids = []
+    for value in account_ids or []:
+        try:
+            account_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if account_id > 0 and account_id not in normalized_account_ids:
+            normalized_account_ids.append(account_id)
+    legacy_account_id = data.get("browser_account_id") or None
+    if not normalized_account_ids and legacy_account_id:
+        normalized_account_ids = [int(legacy_account_id)]
+    data["browser_account_id"] = normalized_account_ids[0] if normalized_account_ids else None
+    data["browser_account_ids_json"] = json.dumps(normalized_account_ids)
+    data["project_type"] = data.get("project_type") or "post"
+    data["browser_type"] = "chrome"
+    data["browser_profile_mode"] = "browser_account"
+    data["browser_profile_path"] = ""
+    data["ocr_languages"] = normalize_ocr_language(data.get("ocr_languages"))
+    data["audio_min_like_count"] = normalize_non_negative_int(data.get("audio_min_like_count"))
+    data["header_row"] = max(1, normalize_non_negative_int(data.get("header_row")) or 1)
+    data["start_row"] = max(1, normalize_non_negative_int(data.get("start_row")) or 2)
+    data["end_row"] = normalize_non_negative_int(data.get("end_row"))
+    if data["end_row"] and data["end_row"] < data["start_row"]:
+        data["end_row"] = data["start_row"]
+    data["max_workers"] = min(3, max(1, normalize_non_negative_int(data.get("max_workers")) or 1))
+    data["write_start_column"] = normalize_column(data.get("write_start_column"), "B")
+    data["processed_log_column"] = normalize_column(data.get("processed_log_column"), "")
+    data["skip_existing_write_data"] = 1 if data.get("skip_existing_write_data") == "on" else 0
+    if data["project_type"] == "page":
+        data["worksheet_name"] = data.get("page_source_worksheet_name") or data.get("worksheet_name") or ""
+        data["link_column"] = "A"
+        data["start_row"] = 2
+        data["end_row"] = 0
+        data["max_workers"] = 1
+        data["rerun_policy"] = data.get("rerun_policy") or "overwrite"
+    return data
+
+
+def normalize_ocr_language(value):
+    if value in {"eng", "por", "ara", "chi_sim", "swa", "fra", "Latin"}:
+        return value
+    if value and "+" in value:
+        return "por" if "por" in value.split("+") else value.split("+")[0]
+    return "por"
+
+
+def normalize_non_negative_int(value):
+    try:
+        return max(0, int(str(value or "0").strip()))
+    except ValueError:
+        return 0
+
+
+def main():
+    from .tray import _log, ensure_port_free, http_alive, pick_port, start_desktop_shell
+
+    host = "127.0.0.1"
+    _log(f"main start frozen={getattr(sys, 'frozen', False)} pid={os.getpid()}")
+    if len(sys.argv) >= 3 and sys.argv[1] == "--server-only":
+        try:
+            port = int(sys.argv[2])
+        except (TypeError, ValueError):
+            _log(f"invalid server port: {sys.argv[2] if len(sys.argv) > 2 else ''}")
+            return
+        _log(f"server child start pid={os.getpid()} port={port}")
+        app = create_app()
+        scheduler = SchedulerThread(interval=30)
+        scheduler.start()
+        try:
+            app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
+        finally:
+            scheduler.stop()
+            _log(f"server child ended pid={os.getpid()} port={port}")
+        return
+
+    port, existing = pick_port(host, 5199)
+    url = f"http://{host}:{port}"
+    _log(f"picked port={port} existing={existing}")
+    if existing or http_alive(url + "/api/ping"):
+        _log(f"already running, open {url}")
+        webbrowser.open(url)
+        return
+    ensure_port_free(host, port)
+    _log(f"port ready {port}")
+
+    server_process = {"value": None}
+
+    def quit_app():
+        process = server_process.get("value")
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        os._exit(0)
+
+    def start_server():
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--server-only", str(port)]
+            working_directory = str(Path(sys.executable).resolve().parent)
+        else:
+            command = [sys.executable, str(BASE_DIR / "launcher.py"), "--server-only", str(port)]
+            working_directory = str(BASE_DIR)
+        stdout_path = DATA_DIR / "server.out.log"
+        stderr_path = DATA_DIR / "server.err.log"
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        try:
+            with stdout_path.open("a", encoding="utf-8") as stdout_log, stderr_path.open("a", encoding="utf-8") as stderr_log:
+                process = subprocess.Popen(
+                    command,
+                    cwd=working_directory,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_log,
+                    stderr=stderr_log,
+                    creationflags=creation_flags,
+                )
+                server_process["value"] = process
+                _log(f"server child launched pid={process.pid} port={port}")
+                return_code = process.wait()
+                _log(f"server child exited pid={process.pid} code={return_code}")
+        except Exception as exc:
+            _log(f"server child launch failed: {exc}")
+
+    start_desktop_shell(url, start_server, quit_app)

@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card shadow-sm mb-4"><div class="card-body">
+  <h1 class="h3">Google 云盘账号</h1>
+  <p class="text-secondary">截图、贴文图片和视频截图保存到每个账号的“FBPostCollector 图片”文件夹，链接写入表格“图片链接”字段。多个启用账号按次轮询，空间不足或授权失效会切换其他账号。</p>
+  <form method="post" class="mb-3">
+    <label class="form-label">图片上传方式</label>
+    <select class="form-select mb-2" name="provider">
+      <option value="drive" {% if provider == 'drive' %}selected{% endif %}>Google Drive 云端硬盘</option>
+      <option value="gyazo" {% if provider == 'gyazo' %}selected{% endif %}>Gyazo（原有方式）</option>
+    </select>
+    <label class="d-block mb-2"><input type="checkbox" name="public_links" {% if public_links %}checked{% endif %}> 新上传图片允许“知道链接的任何人查看”</label>
+    <p class="small text-secondary">“贴文多媒体”列使用 Drive thumbnail 地址生成 IMAGE 预览，“图片链接”列保留原始查看链接。请勾选公开查看以便表格加载图片；私有图片通常无法显示预览。此设置只影响新上传图片。</p>
+    <button class="btn btn-primary btn-sm">保存上传设置</button>
+  </form>
+  <details class="mb-3"><summary>首次使用：配置 Google 授权</summary>
+    <p class="small mt-2">在 Google Cloud 项目启用 Google Drive API，配置 OAuth 同意屏幕并创建“桌面应用”客户端，下载 JSON 后导入。测试模式下请添加需要登录的测试用户；测试授权可能过期，长期使用请完成 Google 要求的发布配置。云盘授权与 Google 表格授权分开保存。</p>
+    <form method="post" enctype="multipart/form-data"><input type="hidden" name="action" value="client">
+      <input class="form-control mb-2" type="file" name="credentials" accept=".json" required>
+      <button class="btn btn-outline-primary btn-sm">导入 OAuth JSON</button>
+    </form>
+  </details>
+  <button id="drive-login" class="btn btn-success btn-sm">添加 / 重新登录 Google 账号</button>
+  <button id="drive-refresh" class="btn btn-outline-secondary btn-sm">刷新账号列表</button>
+  <div id="drive-message" class="mt-3" role="status"></div>
+</div></section>
+<section class="card shadow-sm"><div class="card-body table-responsive">
+  <table class="table align-middle"><thead><tr><th>账号</th><th>状态</th><th>已用 / 总容量</th><th>最后检测</th><th>操作</th></tr></thead><tbody id="drive-rows"></tbody></table>
+  <p class="small text-secondary">清理云盘空间后点击“检测”恢复账号参与轮询。移除只删除本机授权记录，已上传图片仍保留在云盘中。头像变灰表示未就绪或已停用，状态以最近一次检测、上传或登录为准。</p>
+</div></section>
+<script>
+const message = document.getElementById('drive-message');
+const esc = value => String(value ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
+let loginRunning = false;
+async function refreshDrive() {
+  try {
+    const response = await fetch('{{ url_for("drive_status") }}', {cache:'no-store'});
+    if (!response.ok) throw new Error('读取账号失败');
+    const data = await response.json();
+    document.getElementById('drive-rows').innerHTML = data.accounts.map(a => {
+      const ready = a.status === 'ready' && a.enabled;
+      const photo = String(a.avatar || '').startsWith('https://') ? `<img src="${esc(a.avatar)}" referrerpolicy="no-referrer" width="42" height="42" style="border-radius:50%;${ready ? '' : 'filter:grayscale(1);opacity:.4'}" onerror="this.hidden=true">` : '👤';
+      return `<tr><td>${photo} ${esc(a.name)}<div class="small">${esc(a.email)}</div></td><td><span class="badge ${ready ? 'text-bg-success' : 'text-bg-secondary'}">${a.enabled ? esc(a.status_label) : '已停用'}</span><div class="small text-danger">${esc(a.detail)}</div></td><td>${esc(a.used_gb)} GB / ${a.capacity_gb === null ? '未提供' : esc(a.capacity_gb) + ' GB'}</td><td class="small">${esc(a.checked_at)}</td><td><button class="btn btn-sm btn-outline-primary" data-id="${a.id}" data-action="check">检测</button> <button class="btn btn-sm btn-outline-secondary" data-id="${a.id}" data-action="toggle">${a.enabled ? '停用' : '启用'}</button> <button class="btn btn-sm btn-outline-danger" data-id="${a.id}" data-action="remove">移除</button></td></tr>`;
+    }).join('') || '<tr><td colspan="5">尚未添加 Google 账号</td></tr>';
+    if (data.login.status === 'running' || loginRunning) message.textContent = data.login.message;
+    loginRunning = data.login.status === 'running';
+    document.getElementById('drive-login').disabled = loginRunning;
+  } catch (error) { message.textContent = error.message; }
+}
+document.getElementById('drive-login').onclick = async () => {
+  message.textContent = '正在打开 Google 登录页面…';
+  try {
+    const response = await fetch('{{ url_for("drive_login") }}', {method:'POST'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    loginRunning = true; message.textContent = data.message; await refreshDrive();
+  } catch (error) { message.textContent = error.message; }
+};
+document.getElementById('drive-rows').onclick = async event => {
+  const button = event.target.closest('[data-action]');
+  if (!button) return;
+  button.disabled = true;
+  message.textContent = '正在处理…';
+  try {
+    const response = await fetch(`/drive-accounts/${button.dataset.id}/${button.dataset.action}`, {method:'POST'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    message.textContent = '处理完成，请查看账号状态。';
+    await refreshDrive();
+  } catch (error) { message.textContent = error.message; button.disabled = false; }
+};
+document.getElementById('drive-refresh').onclick = refreshDrive;
+refreshDrive();
+setInterval(refreshDrive, 4000);
+</script>
+{% endblock %}

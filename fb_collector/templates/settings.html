@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card shadow-sm mb-4">
+  <div class="card-body">
+    <h1 class="h3 mb-3">授权设置</h1>
+    <h2 class="h5 mb-2">Google Sheets</h2>
+    <p class="text-secondary small">
+      选择 Google Cloud 服务账号 JSON 文件并保存即可授权，无需再登录 Google 账号。
+      保存后请把要写入的表格共享给该服务账号邮箱，权限选“编辑者”。
+    </p>
+    <p class="small mb-3">
+      状态：
+      {% if google_auth.authorized and google_auth.auth_type == "service_account" %}
+        <span class="text-success">已授权（服务账号）</span>
+        {% if google_auth.service_account_email %}
+          <span class="mono">{{ google_auth.service_account_email }}</span>
+        {% endif %}
+      {% elif google_auth.authorized %}
+        <span class="text-success">已授权</span>
+      {% else %}
+        <span class="text-danger">未授权</span>
+      {% endif %}
+    </p>
+    <form action="{{ url_for('google_credentials_upload') }}" method="post" enctype="multipart/form-data" class="row g-2 align-items-end mb-3">
+      <label class="col-md-8 form-label mb-0">
+        服务账号 JSON 文件
+        <input class="form-control form-control-sm mt-1" type="file" name="credentials_file" accept=".json,application/json" required>
+      </label>
+      <div class="col-md-4">
+        <button class="btn btn-primary btn-sm" type="submit">保存并授权</button>
+      </div>
+    </form>
+    <div class="d-flex gap-2 flex-wrap">
+      {% if google_auth.auth_type == "oauth_client" %}
+      <form action="{{ url_for('google_login') }}" method="post" class="inline">
+        <button class="btn btn-outline-primary btn-sm" type="submit">登录 Google 账号</button>
+      </form>
+      {% endif %}
+      <form action="{{ url_for('google_logout') }}" method="post" class="inline">
+        <button type="submit" class="btn btn-danger btn-sm">删除 Google 授权</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="card shadow-sm mb-4">
+  <div class="card-body">
+    <h2 class="h5 mb-2">AI 翻译</h2>
+    <p class="text-secondary small">
+      用于贴文、OCR 文本和音频文本翻译。密钥只保存在本机，不会显示在页面或写入运行日志。
+      每个服务可添加多个密钥，软件会按请求轮询；当前密钥限额不足或调用失败时会自动尝试下一个。
+      “自动选择”会优先使用已配置的 Gemini，其次 Groq，全部失败后再使用免费备用线路。
+    </p>
+    <form method="post" class="row g-3" autocomplete="off">
+      <label class="col-md-4 form-label">翻译服务
+        <select class="form-select form-select-sm mt-1" name="translation_provider">
+          <option value="auto" {% if translation_provider == 'auto' %}selected{% endif %}>自动选择</option>
+          <option value="gemini" {% if translation_provider == 'gemini' %}selected{% endif %}>Google Gemini</option>
+          <option value="groq" {% if translation_provider == 'groq' %}selected{% endif %}>Groq</option>
+          <option value="free" {% if translation_provider == 'free' %}selected{% endif %}>仅使用免费备用线路</option>
+        </select>
+      </label>
+      <div class="col-md-8"></div>
+      <div class="col-12">
+        <label class="form-check-label">
+          <input class="form-check-input me-1" type="checkbox" name="ai_ocr_enabled" value="1" {% if ai_ocr_enabled %}checked{% endif %}>
+          优先使用所选 AI 进行视觉 OCR（会消耗 API 用量；AI 失败时自动回退 Tesseract）
+        </label>
+      </div>
+
+      <label class="col-md-4 form-label">添加 Google Gemini API Key
+        <textarea class="form-control form-control-sm mt-1" name="gemini_api_keys_add" rows="3"
+                  placeholder="每行一个 Key；保存后加入现有密钥池"></textarea>
+        <span class="form-text">当前已配置 {{ gemini_key_count }} 个；留空不会改动现有密钥。</span>
+        <a class="form-text ms-2" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">获取密钥</a>
+      </label>
+      <label class="col-md-4 form-label">Gemini 模型
+        <input class="form-control form-control-sm mt-1" name="gemini_model" value="{{ gemini_model }}">
+      </label>
+      <label class="col-md-4 form-label pt-md-4">
+        <input class="form-check-input" type="checkbox" name="clear_gemini_api_keys" value="1"> 清除全部 Gemini 密钥
+      </label>
+
+      <label class="col-md-4 form-label">添加 Groq API Key
+        <textarea class="form-control form-control-sm mt-1" name="groq_api_keys_add" rows="3"
+                  placeholder="每行一个 Key；保存后加入现有密钥池"></textarea>
+        <span class="form-text">当前已配置 {{ groq_key_count }} 个；留空不会改动现有密钥。</span>
+        <a class="form-text ms-2" href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer">获取密钥</a>
+      </label>
+      <label class="col-md-4 form-label">Groq 模型
+        <input class="form-control form-control-sm mt-1" name="groq_model" value="{{ groq_model }}">
+      </label>
+      <label class="col-md-4 form-label">Groq 视觉 OCR 模型
+        <input class="form-control form-control-sm mt-1" name="groq_vision_model" value="{{ groq_vision_model }}">
+      </label>
+      <label class="col-md-4 form-label">
+        <input class="form-check-input" type="checkbox" name="clear_groq_api_keys" value="1"> 清除全部 Groq 密钥
+      </label>
+
+      <div class="col-12 d-flex gap-2">
+        <button class="btn btn-primary btn-sm" type="submit" name="action" value="save_translation">保存翻译设置</button>
+        <button class="btn btn-outline-success btn-sm" type="submit" name="action" value="test_translation">保存并测试翻译</button>
+      </div>
+    </form>
+  </div>
+</section>
+
+<section class="card shadow-sm">
+  <div class="card-body">
+    <h2 class="h5 mb-3">Gyazo</h2>
+    <form method="post" class="row g-3 align-items-end">
+      <label class="col-md-6 form-label">
+        当前 Gyazo Access Token
+        <input class="form-control form-control-sm mt-1" name="gyazo_access_token" value="{{ gyazo_access_token }}" placeholder="用户自己的 Token，留空则使用默认 Token">
+      </label>
+      <div class="col-12">
+        <button class="btn btn-primary btn-sm" type="submit">保存</button>
+      </div>
+    </form>
+  </div>
+</section>
+{% endblock %}
