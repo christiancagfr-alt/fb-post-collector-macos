@@ -28,5 +28,8 @@ class ComponentValidationTests(unittest.TestCase):
                 installer.run_command_logged([sys.executable, "-c", "import time; time.sleep(20)"], timeout=0.3)
 
     def test_tesseract_official_asset(self):
+        if sys.platform == "darwin":
+            self.assertEqual(installer.TESSERACT_MANUAL_LINKS[0]["url"], "https://brew.sh")
+            return
         self.assertEqual(installer.TESSERACT_MANUAL_LINKS[0]["url"], installer.TESSERACT_SETUP_URLS[0])
         self.assertIn("github.com/tesseract-ocr/tesseract/releases/download/5.5.3/", installer.TESSERACT_SETUP_URLS[0])

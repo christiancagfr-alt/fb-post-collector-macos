@@ -544,7 +544,7 @@ def run_tray(url, on_quit):
     def setup(icon):
         icon.visible = True
         try:
-            icon.notify("软件正在运行。托盘图标可能在右下角 ^ 隐藏图标里。", "FB贴文数据采集")
+            icon.notify("软件正在运行，请使用顶部菜单栏图标。" if sys.platform == "darwin" else "软件正在运行。托盘图标可能在右下角 ^ 隐藏图标里。", "FB贴文数据采集")
         except Exception:
             pass
 
