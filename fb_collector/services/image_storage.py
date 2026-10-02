@@ -2,6 +2,7 @@ import re
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .. import db
+from ..security import SpreadsheetFormula
 from . import drive_storage, gyazo
 
 
@@ -15,6 +16,8 @@ def preview_formula(url):
     if not url:
         return ""
     parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or any(char in url for char in ('"', '\r', '\n')):
+        return ""
     if parsed.hostname == "drive.google.com":
         query = parse_qs(parsed.query)
         match = re.search(r"/file/d/([A-Za-z0-9_-]+)(?:/|$)", parsed.path)
@@ -25,4 +28,4 @@ def preview_formula(url):
         if query.get("resourcekey"):
             params["resourcekey"] = query["resourcekey"][0]
         url = "https://drive.google.com/thumbnail?" + urlencode(params)
-    return f'=IMAGE("{url}")'
+    return SpreadsheetFormula(f'=IMAGE("{url}")')

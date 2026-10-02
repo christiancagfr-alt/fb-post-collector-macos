@@ -7,13 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
 
 from .audio import transcribe_video
+from .media_download import download_media, validate_media_url
 from ..config import DATA_DIR, TEMP_DIR
 from .browser_profiles import (
     account_debug_port,
@@ -456,9 +456,7 @@ def meta_content(soup, key):
 
 
 def download_temp_file(url, suffix=".jpg"):
-    resp = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
-    resp.raise_for_status()
-    content_type = resp.headers.get("content-type", "")
+    content, content_type = download_media(url, 512 * 1024 * 1024 if suffix == ".mp4" else 32 * 1024 * 1024)
     if "png" in content_type:
         suffix = ".png"
     elif "webp" in content_type:
@@ -466,7 +464,7 @@ def download_temp_file(url, suffix=".jpg"):
     elif "mp4" in content_type:
         suffix = ".mp4"
     handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    handle.write(resp.content)
+    handle.write(content)
     handle.close()
     return Path(handle.name)
 
@@ -500,7 +498,8 @@ def cookie_file_from_driver(driver):
     seen = set()
     for cookie in cookies_from_driver(driver):
         domain = cookie.get("domain") or ".facebook.com"
-        if "facebook.com" not in domain and "fbcdn.net" not in domain and "fb.com" not in domain:
+        normalized_domain = domain.lower().lstrip(".")
+        if not any(normalized_domain == root or normalized_domain.endswith("." + root) for root in ("facebook.com", "fbcdn.net", "fb.com")):
             continue
         include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
         cookie_path = cookie.get("path") or "/"
@@ -674,7 +673,11 @@ def clean_facebook_image_description(text):
 
 def translate_field(values, source_key, target_key, error_key):
     stage(f"翻译：{source_key}")
-    result = translate_to_chinese_detail(values.get(source_key, ""), None)
+    source_language = "auto"
+    if source_key == "ocr_text":
+        source_language = {"eng": "en", "por": "pt", "ara": "ar", "fra": "fr",
+                           "swa": "sw", "chi_sim": "zh-CN"}.get(values.get("ocr_language"), "auto")
+    result = translate_to_chinese_detail(values.get(source_key, ""), None, source_language=source_language)
     values[target_key] = result["text"]
     if result["error"]:
         values[error_key] = result["error"]
@@ -1132,8 +1135,9 @@ class FacebookScraper:
         values["yt_dlp_error"] = f"path={values.get('yt_dlp_path', '')}; version={values.get('yt_dlp_version', '')}; " + " | ".join(errors)
 
     def ytdlp_info(self, executable, url, cookie_path):
+        validate_media_url(url)
         proc = run_hidden(
-            [executable, "--cookies", str(cookie_path), "--dump-single-json", "--no-playlist", url],
+            [executable, "--cookies", str(cookie_path), "--dump-single-json", "--no-playlist", "--", url],
             capture_output=True,
             text=True,
             timeout=180,
@@ -1143,6 +1147,7 @@ class FacebookScraper:
         return json.loads(proc.stdout or "{}")
 
     def ytdlp_download(self, executable, url, cookie_path, expected_video_id=""):
+        validate_media_url(url)
         prefix = f"fb_video_{int(time.time() * 1000)}"
         output_template = str(TEMP_DIR / f"{prefix}_%(id)s.%(ext)s")
         commands = [
@@ -1157,6 +1162,7 @@ class FacebookScraper:
                 "mp4",
                 "-o",
                 output_template,
+                "--",
                 url,
             ],
             [
@@ -1167,6 +1173,7 @@ class FacebookScraper:
                 "mp4",
                 "-o",
                 output_template,
+                "--",
                 url,
             ],
             [
@@ -1175,6 +1182,7 @@ class FacebookScraper:
                 "mp4",
                 "-o",
                 output_template,
+                "--",
                 url,
             ],
         ]
@@ -1310,9 +1318,8 @@ class FacebookScraper:
         captions_url = values.get("captions_url")
         if captions_url:
             try:
-                response = requests.get(captions_url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
-                response.raise_for_status()
-                values["audio_text"] = strip_caption_text(response.text)
+                caption_bytes, _ = download_media(captions_url, 4 * 1024 * 1024)
+                values["audio_text"] = strip_caption_text(caption_bytes.decode("utf-8-sig", errors="replace"))
                 if not values["audio_text"]:
                     values["audio_error"] = "caption file was found but contained no readable text"
                 return

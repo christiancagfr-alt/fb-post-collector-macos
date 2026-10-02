@@ -12,3 +12,14 @@ tools/
 google_credentials.json
 *.token
 .env
+.env.*
+!.env.example
+.venv*/
+tokens/
+browser_profiles/
+*credentials*.json
+*token*.json
+*.pem
+*.key
+build-*.log
+docs/SECURITY-AUDIT-*.txt

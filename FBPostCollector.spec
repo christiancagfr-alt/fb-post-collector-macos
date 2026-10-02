@@ -14,8 +14,7 @@ datas = [
     (str(root / "用户使用说明.md"), "."),
     (str(root / "Google云盘使用说明.md"), "."),
 ]
-if (root / "google_credentials.json").exists():
-    datas.append((str(root / "google_credentials.json"), "."))
+# User credentials must never be distributed in an installer.
 if (root / "tools").exists():
     datas.append((str(root / "tools"), "tools"))
 
@@ -24,7 +23,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=["pystray", "pystray._win32", "PIL", "PIL.Image", "PIL.ImageDraw", "tkinter", "tkinter.ttk"],
+    hiddenimports=["pystray", "pystray._win32", "PIL", "PIL.Image", "PIL.ImageDraw", "tkinter", "tkinter.ttk", "keyring.backends.Windows", "cryptography.fernet"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

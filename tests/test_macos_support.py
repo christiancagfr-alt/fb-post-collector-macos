@@ -11,7 +11,7 @@ class MacSupportTests(unittest.TestCase):
         self.assertIn('https://brew.sh', result['output'])
 
     def test_download_matches_platform_and_arch(self):
-        assets = [{'name': name, 'browser_download_url': 'https://github.com/org/repo/' + name}
+        assets = [{'name': name, 'browser_download_url': 'https://github.com/christiancagfr-alt/fb-post-collector-macos/releases/download/v1/' + name}
                   for name in ['Setup.exe', 'macos-arm64.dmg', 'macos-x86_64.dmg']]
         with patch('sys.platform', 'darwin'), patch('platform.machine', return_value='arm64'):
             self.assertEqual([a['name'] for a in update_checker.preferred_assets(assets)], ['macos-arm64.dmg'])

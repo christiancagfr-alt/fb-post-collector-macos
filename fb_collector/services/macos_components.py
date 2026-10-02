@@ -1,6 +1,7 @@
 """Install optional macOS components without requiring system Python."""
 import shutil
 from pathlib import Path
+from .component_manifest import PIP_REQUIREMENT, WHISPER_REQUIREMENT
 
 
 def install_component(component):
@@ -34,7 +35,8 @@ def install_component(component):
         python = Path(prefix.stdout.strip()) / "bin" / "python3.12"
         venv = writable_tools_dir() / "whisper-venv"
         commands = [[str(python), "-m", "venv", str(venv)],
-                    [str(venv / "bin/python"), "-m", "pip", "install", "--upgrade", "pip", "openai-whisper"]]
+                    [str(venv / "bin/python"), "-m", "pip", "install", "--upgrade", PIP_REQUIREMENT],
+                    [str(venv / "bin/python"), "-m", "pip", "install", "--upgrade", WHISPER_REQUIREMENT]]
         for command in commands:
             completed = run_command_logged(command, timeout=3600)
             if completed.returncode:

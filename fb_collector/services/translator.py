@@ -8,7 +8,7 @@ from pathlib import Path
 import requests
 
 from ..db import setting_get
-from .task_control import check_cancelled
+from .task_control import check_cancelled, interruptible_lock, stage
 
 
 GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
@@ -44,23 +44,29 @@ def translate_to_chinese(text, driver=None):
     return result["text"]
 
 
-def translate_to_chinese_detail(text, driver=None):
+def translate_to_chinese_detail(text, driver=None, source_language="auto"):
     if not text:
         return {"text": "", "error": ""}
-    try:
-        chunks = split_text(text)
-        translated = []
-        errors = []
-        for chunk in chunks:
-            check_cancelled()
-            part = translate_chunk(chunk)
-            if part:
-                translated.append(part)
-            else:
-                errors.append("empty translation result")
-        return {"text": "\n".join(translated).strip(), "error": " | ".join(errors)}
-    except Exception as exc:
-        return {"text": "", "error": repr(exc)}
+    chunks = split_text(text)
+    translated, errors = [], []
+    config = translation_config()
+    config["source_language"] = source_language
+    successes = 0
+    for index, chunk in enumerate(chunks, 1):
+        check_cancelled()
+        stage(f"翻译分段：{index}/{len(chunks)}")
+        try:
+            part = translate_chunk(chunk, config)
+            if not part:
+                raise TranslateError("翻译服务返回空内容")
+            translated.append(part)
+            successes += 1
+        except Exception as exc:
+            error = f"第 {index}/{len(chunks)} 段：{safe_api_error(exc)}"
+            errors.append(error)
+            translated.append(f"[第 {index} 段翻译失败，原文已保留在原文字段]")
+            stage(f"翻译未完成：{error}")
+    return {"text": "\n".join(translated).strip() if successes else "", "error": " | ".join(errors)}
 
 
 def translation_config():
@@ -302,11 +308,12 @@ def translate_chunk(text, config=None):
         provider,
         config.get("groq_model") or "",
         config.get("gemini_model") or "",
+        config.get("source_language") or "auto",
         len(configured_api_keys("groq", config)),
         len(configured_api_keys("gemini", config)),
         str(text or ""),
     )
-    with _translate_lock:
+    with interruptible_lock(_translate_lock):
         cached = _translation_cache.get(cache_key)
         if cached is not None:
             _translation_cache.move_to_end(cache_key)
@@ -367,7 +374,7 @@ def translate_chunk(text, config=None):
                             "dt": "t",
                             "q": text,
                         },
-                        timeout=30,
+                        timeout=(5, 15),
                         headers={
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
                             "Accept": "application/json,text/plain,*/*",
@@ -383,7 +390,7 @@ def translate_chunk(text, config=None):
                     errors.append("Google: empty translation result")
                 except Exception as exc:
                     _last_request_at = time.monotonic()
-                    errors.append(f"Google: {exc!r}")
+                    errors.append(f"Google: {safe_api_error(exc)}")
                     status_code = getattr(getattr(exc, "response", None), "status_code", None)
                     if status_code == 429:
                         _google_cooldown_until = time.monotonic() + GOOGLE_COOLDOWN_SECONDS
@@ -393,13 +400,14 @@ def translate_chunk(text, config=None):
         try:
             parts = []
             for piece in split_utf8_bytes(text, MYMEMORY_MAX_BYTES):
+                check_cancelled()
                 elapsed = time.monotonic() - _last_request_at
                 if elapsed < MIN_REQUEST_INTERVAL:
                     time.sleep(MIN_REQUEST_INTERVAL - elapsed)
                 response = requests.get(
                     MYMEMORY_TRANSLATE_URL,
-                    params={"q": piece, "langpair": "autodetect|zh-CN", "mt": "1"},
-                    timeout=30,
+                    params={"q": piece, "langpair": f"{config.get('source_language') if config.get('source_language') not in {None, '', 'auto'} else 'autodetect'}|zh-CN", "mt": "1"},
+                    timeout=(5, 15),
                     headers={"User-Agent": "FBPostCollector/1.4.6"},
                 )
                 _last_request_at = time.monotonic()
@@ -411,7 +419,7 @@ def translate_chunk(text, config=None):
                 parts.append(translated)
             return remember_translation(cache_key, "\n".join(parts).strip())
         except Exception as exc:
-            errors.append(f"MyMemory: {exc!r}")
+            errors.append(f"MyMemory: {safe_api_error(exc)}")
             raise TranslateError(" | ".join(errors)) from exc
 
 
@@ -431,7 +439,7 @@ def translate_with_groq(text, api_key, model=DEFAULT_GROQ_MODEL):
             "temperature": 0,
             "max_completion_tokens": 4096,
         },
-        timeout=60,
+        timeout=(5, 30),
     )
     response.raise_for_status()
     data = response.json()
@@ -457,7 +465,7 @@ def translate_with_gemini(text, api_key, model=DEFAULT_GEMINI_MODEL):
             "contents": [{"role": "user", "parts": [{"text": str(text or "")}]}],
             "generationConfig": {"temperature": 0, "maxOutputTokens": 4096},
         },
-        timeout=60,
+        timeout=(5, 30),
     )
     response.raise_for_status()
     data = response.json()
@@ -483,7 +491,15 @@ def safe_api_error(exc):
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     if status:
-        return f"HTTP {status}"
+        reason = {401: "密钥无效或已失效", 403: "无访问权限或服务地区受限",
+                  404: "模型或接口不存在，请检查模型名称", 429: "请求过于频繁或额度已用完",
+                  500: "翻译服务内部错误", 502: "翻译服务暂时不可用",
+                  503: "翻译服务繁忙", 504: "翻译服务响应超时"}.get(status, "翻译请求失败")
+        return f"HTTP {status}：{reason}"
+    if isinstance(exc, requests.Timeout):
+        return "翻译请求超时，请检查网络或切换服务"
+    if isinstance(exc, requests.ConnectionError):
+        return "无法连接翻译服务，请检查网络或代理"
     return type(exc).__name__
 
 

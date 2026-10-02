@@ -1,0 +1,83 @@
+name: Build Windows installers
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install dependencies and test
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/run_tests.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Bundle verified tools
+        run: python bundle_runtime_tools.py
+      - name: Build application
+        run: python -m PyInstaller --clean --noconfirm FBPostCollector.spec
+      - name: Verify bundled application
+        run: python scripts/smoke_windows.py
+      - name: Build installers and checksums
+        shell: pwsh
+        run: |
+          $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $compiler)) { throw 'Inno Setup is missing from the runner' }
+          & $compiler FBPostCollector.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python build_msi.py --source dist/FBPostCollector --output dist/FBPostCollector-Setup-v1.4.18.msi
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item installer_output/FBPostCollector-Setup-v1.4.18.exe release/
+          Copy-Item dist/FBPostCollector-Setup-v1.4.18.msi release/
+          Compress-Archive -Path dist/FBPostCollector -DestinationPath release/FBPostCollector-v1.4.18-windows.zip
+          Get-ChildItem release -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content release/SHA256-windows.txt -Encoding utf8
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: release/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-installers
+          path: release/*
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-installers
+          path: release
+      - name: Upload to personal repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          test "$GH_REPO" = "christiancagfr-alt/fb-post-collector-macos"
+          gh release upload v1.4.18 release/*
+          gh release upload v1.4.18 docs/FEATURE-GUIDE-v1.4.18.txt --clobber
+          gh release edit v1.4.18 --title "v1.4.18 — Windows / macOS" --notes-file MAC_RELEASE_NOTES.txt

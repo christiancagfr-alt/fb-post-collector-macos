@@ -1,4 +1,4 @@
-FB贴文数据采集 1.4.17 — macOS 测试版
+FB贴文数据采集 1.4.18 — macOS 安全加固版
 
 系统要求：macOS 15 或以上。arm64 用于 Apple 芯片，x86_64 用于 Intel。
 打开 DMG，将 FBPostCollector 拖到 Applications 后启动。
@@ -9,3 +9,6 @@ FB贴文数据采集 1.4.17 — macOS 测试版
 此测试版未使用 Apple Developer ID 签名或公证，macOS 可能阻止首次打开。
 已执行自动化测试及打包服务启动检查；尚未在真实 Facebook/Google 账号上完成 Mac 端到端验证。
 不要将 Windows 的浏览器配置文件复制到 Mac，请重新登录账号。
+升级前请退出并备份数据，在原电脑原系统账号运行。本版自动迁移支持的凭据到钥匙串保护的密文，旧版不能直接读取新格式。
+个人仓库下载：https://github.com/christiancagfr-alt/fb-post-collector-macos/releases
+详细功能说明随 Release 提供，安全审核报告仅在开发者本地保留。

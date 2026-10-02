@@ -12,6 +12,8 @@ from pathlib import Path
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 
 from . import db
+from .security import configure_local_security
+from .credential_store import migrate_credentials
 from .project_transfer import export_project, validate_import
 from .services import drive_storage
 from .services.account_status import record_status
@@ -163,9 +165,10 @@ OCR_LANGUAGE_OPTIONS = [
 def create_app():
     db.init_db()
     drive_storage.init_storage()
+    migrate_credentials()
     app = Flask(__name__)
     app.config["JSON_AS_ASCII"] = False
-    app.secret_key = "fb-post-collector-local-dev"
+    configure_local_security(app)
 
     @app.route("/")
     def index():
@@ -545,8 +548,10 @@ def create_app():
     @app.route("/settings", methods=["GET", "POST"])
     def settings():
         if request.method == "POST":
-            if "gyazo_access_token" in request.form:
-                db.setting_set("gyazo_access_token", request.form.get("gyazo_access_token", ""))
+            if request.form.get("clear_gyazo_access_token") == "1":
+                db.setting_set("gyazo_access_token", "")
+            elif request.form.get("gyazo_access_token", "").strip():
+                db.setting_set("gyazo_access_token", request.form["gyazo_access_token"].strip())
                 flash("Gyazo Token 已保存。", "success")
             if "translation_provider" in request.form:
                 provider = request.form.get("translation_provider", "auto")
@@ -584,7 +589,7 @@ def create_app():
         gemini_keys = parse_api_keys(db.setting_get("gemini_api_keys", "") or db.setting_get("gemini_api_key", ""))
         return render_template(
             "settings.html",
-            gyazo_access_token=db.setting_get("gyazo_access_token"),
+            gyazo_configured=bool(db.setting_get("gyazo_access_token")),
             google_auth=google_auth_status(),
             translation_provider=db.setting_get("translation_provider", "auto"),
             groq_key_configured=bool(groq_keys),

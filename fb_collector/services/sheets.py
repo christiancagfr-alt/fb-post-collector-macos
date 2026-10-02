@@ -13,6 +13,8 @@ from googleapiclient.errors import HttpError
 
 from ..config import APP_ROOT_DIR, TOKEN_DIR
 from .. import db
+from ..security import safe_sheet_value
+from ..credential_store import read_secret_file, write_secret_file
 from ..fields import column_to_index, index_to_column, normalize_column
 from .errors import SheetWriteError
 
@@ -147,7 +149,7 @@ class SheetsClient:
             data.append(
                 {
                     "range": f"'{worksheet_name}'!{col}{row_number}",
-                    "values": [[value]],
+                    "values": [[safe_sheet_value(value)]],
                 }
             )
         if not data:
@@ -174,7 +176,7 @@ class SheetsClient:
                 range=rng,
                 valueInputOption="USER_ENTERED",
                 insertDataOption="INSERT_ROWS",
-                body={"values": [values]},
+                body={"values": [[safe_sheet_value(value) for value in values]]},
             ),
             "写入表格失败",
         )
@@ -185,7 +187,7 @@ class SheetsClient:
                 spreadsheetId=spreadsheet_id,
                 range=range_name,
                 valueInputOption="USER_ENTERED",
-                body={"values": values},
+                body={"values": [[safe_sheet_value(value) for value in row] for row in values]},
             ),
             "写入表格失败",
         )
@@ -214,7 +216,7 @@ def inspect_credentials_file(path=None):
     if not target.exists():
         return {"exists": False, "type": "", "email": "", "path": str(target)}
     try:
-        data = json.loads(target.read_text(encoding="utf-8"))
+        data = json.loads(read_secret_file(target))
     except Exception:
         return {"exists": True, "type": "invalid", "email": "", "path": str(target)}
     if not isinstance(data, dict):
@@ -231,8 +233,26 @@ def inspect_credentials_file(path=None):
     return {"exists": True, "type": "unknown", "email": "", "path": str(target)}
 
 
+def trusted_google_config(data):
+    if not isinstance(data, dict):
+        raise ValueError("Google 凭据格式无效")
+    data = dict(data)
+    if data.get("type") == "service_account":
+        data["token_uri"] = "https://oauth2.googleapis.com/token"
+        data["universe_domain"] = "googleapis.com"
+    for section in ("installed", "web"):
+        if section in data:
+            if not isinstance(data[section], dict):
+                raise ValueError("Google OAuth 配置格式无效")
+            data[section] = dict(data[section], auth_uri="https://accounts.google.com/o/oauth2/auth",
+                                 token_uri="https://oauth2.googleapis.com/token", redirect_uris=["http://localhost"])
+    return data
+
+
 def save_uploaded_google_credentials(uploaded_file):
-    raw = uploaded_file.read()
+    raw = uploaded_file.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ValueError("凭据文件不能超过 1 MB")
     if not raw:
         raise ValueError("文件是空的，请选择 Google 服务账号 JSON。")
     try:
@@ -241,6 +261,7 @@ def save_uploaded_google_credentials(uploaded_file):
         raise ValueError("无法解析 JSON 文件。") from exc
     if not isinstance(data, dict):
         raise ValueError("JSON 格式不正确。")
+    data = trusted_google_config(data)
     if data.get("type") == "service_account":
         if not data.get("client_email") or not data.get("private_key"):
             raise ValueError("这不是有效的服务账号文件，请选择含 client_email 和 private_key 的 JSON。")
@@ -252,7 +273,7 @@ def save_uploaded_google_credentials(uploaded_file):
     else:
         raise ValueError("请选择 Google 服务账号 JSON 文件。")
     dest = TOKEN_DIR / "google_credentials.json"
-    dest.write_bytes(raw)
+    write_secret_file(dest, json.dumps(data))
     db.setting_set("google_credentials_path", str(dest))
     db.setting_set("google_auth_type", cred_type)
     db.setting_set("google_service_account_email", email)
@@ -264,7 +285,7 @@ def save_uploaded_google_credentials(uploaded_file):
 def load_google_credentials():
     info = inspect_credentials_file()
     if info.get("type") == "service_account":
-        return service_account.Credentials.from_service_account_file(info["path"], scopes=SCOPES)
+        return service_account.Credentials.from_service_account_info(trusted_google_config(json.loads(read_secret_file(info["path"]))), scopes=SCOPES)
     creds = load_saved_credentials()
     if creds and creds.expired and creds.refresh_token:
         try:
@@ -284,7 +305,7 @@ def load_saved_credentials():
             return None
     legacy_token = db.setting_get("google_token_path")
     if legacy_token and Path(legacy_token).exists():
-        return Credentials.from_authorized_user_file(legacy_token, SCOPES)
+        return Credentials.from_authorized_user_info(json.loads(read_secret_file(legacy_token)), SCOPES)
     return None
 
 
@@ -331,7 +352,7 @@ def run_google_oauth():
             "当前文件不是 OAuth 客户端配置。请上传服务账号 JSON，保存后即可授权。",
             f"Unsupported credentials type: {info.get('type')}",
         )
-    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), SCOPES)
+    flow = InstalledAppFlow.from_client_config(trusted_google_config(json.loads(read_secret_file(credentials_file))), SCOPES)
     creds = flow.run_local_server(port=0)
     save_credentials(creds)
     return creds

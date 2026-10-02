@@ -15,10 +15,11 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from .. import db
+from ..credential_store import protect, reveal, read_secret_file, write_secret_file
 from ..config import TOKEN_DIR
 from .errors import UploadError
 from .task_control import stage, interruptible_lock
-from .sheets import bundled_credentials_path
+from .sheets import bundled_credentials_path, trusted_google_config
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 _upload_lock = threading.RLock()
@@ -52,6 +53,8 @@ def accounts():
 
 
 def _update(account_id, **values):
+    if "token" in values:
+        values["token"] = protect(values["token"])
     allowed = {"token", "folder_id", "enabled", "status", "detail", "used", "capacity", "checked_at", "avatar", "name"}
     if not values or not set(values).issubset(allowed):
         raise ValueError("无效账号更新")
@@ -65,7 +68,9 @@ def _account(account_id):
         row = conn.execute("SELECT * FROM drive_accounts WHERE id=?", (account_id,)).fetchone()
     if not row:
         raise ValueError("云盘账号不存在")
-    return dict(row)
+    result = dict(row)
+    result["token"] = reveal(result["token"])
+    return result
 
 
 def save_client(upload):
@@ -77,13 +82,13 @@ def save_client(upload):
     except (ValueError, UnicodeError):
         raise ValueError("请选择有效的 OAuth JSON") from None
     installed = data.get("installed", {}) if isinstance(data, dict) else {}
-    if not installed.get("client_id") or not installed.get("client_secret"):
+    if not isinstance(installed, dict) or not installed.get("client_id") or not installed.get("client_secret"):
         raise ValueError("需要桌面应用 OAuth 客户端 JSON，不能使用服务账号 JSON")
     # Use Google's endpoints even if an imported file contains custom endpoints.
     installed["auth_uri"] = "https://accounts.google.com/o/oauth2/auth"
     installed["token_uri"] = "https://oauth2.googleapis.com/token"
     installed["redirect_uris"] = ["http://localhost"]
-    (TOKEN_DIR / "drive_client.json").write_text(json.dumps({"installed": installed}), encoding="utf-8")
+    write_secret_file(TOKEN_DIR / "drive_client.json", json.dumps({"installed": installed}))
 
 
 def client_path():
@@ -101,7 +106,7 @@ def start_login():
     if not path.exists():
         raise ValueError("请先导入 Google 桌面应用 OAuth 客户端 JSON")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_secret_file(path))
     except ValueError:
         raise ValueError("OAuth 客户端配置无效") from None
     if "installed" not in data:
@@ -115,7 +120,7 @@ def start_login():
 
 def _login_worker(path):
     try:
-        flow = InstalledAppFlow.from_client_secrets_file(path, SCOPES)
+        flow = InstalledAppFlow.from_client_config(trusted_google_config(json.loads(read_secret_file(path))), SCOPES)
         creds = flow.run_local_server(host="127.0.0.1", port=0, timeout_seconds=300,
                                       prompt="consent select_account", access_type="offline")
         if not creds or not creds.refresh_token:
@@ -130,7 +135,7 @@ def _login_worker(path):
                 email=excluded.email,name=excluded.name,avatar=excluded.avatar,token=excluded.token,
                 status='ready',detail='',checked_at=excluded.checked_at""",
                 (identity, user.get("emailAddress", ""), user.get("displayName", "Google"),
-                 user.get("photoLink", ""), creds.to_json(), db.utc_now()))
+                 user.get("photoLink", ""), protect(creds.to_json()), db.utc_now()))
             conn.execute("UPDATE drive_accounts SET used=?,capacity=? WHERE identity=?",
                          (int(quota.get("usage", 0)), int(quota["limit"]) if "limit" in quota else None, identity))
         message = "登录成功，账号已保存；重复登录会更新原账号授权"

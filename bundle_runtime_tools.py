@@ -3,46 +3,30 @@
 from __future__ import annotations
 
 import shutil
-import urllib.request
 import zipfile
 from pathlib import Path
+from fb_collector.services.component_manifest import YT_DLP_URL, FFMPEG_URLS
+from fb_collector.services.verified_download import download_verified
 
 
 ROOT = Path(__file__).resolve().parent
 TOOLS = ROOT / "tools"
-YT_DLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-FFMPEG_URLS = [
-    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-    "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
-]
-USER_AGENT = "Mozilla/5.0 FBPostCollector"
 
 
 def download(url: str, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
     print(f"downloading {url}")
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=120) as response, tmp.open("wb") as handle:
-        shutil.copyfileobj(response, handle)
-    tmp.replace(dest)
-    print(f"saved {dest}")
+    download_verified(url, dest)
+    print(f"SHA256 verified: {dest}")
 
 
 def ensure_yt_dlp() -> None:
     dest = TOOLS / "yt-dlp.exe"
-    if dest.exists() and dest.stat().st_size > 1_000_000:
-        print(f"yt-dlp already present: {dest}")
-        return
     download(YT_DLP_URL, dest)
 
 
 def ensure_ffmpeg() -> None:
     dest_dir = TOOLS / "ffmpeg"
     exe = dest_dir / "ffmpeg.exe"
-    if exe.exists() and exe.stat().st_size > 1_000_000:
-        print(f"ffmpeg already present: {exe}")
-        return
     zip_path = TOOLS / "ffmpeg-download.zip"
     last_error = None
     for url in FFMPEG_URLS:
@@ -53,6 +37,8 @@ def ensure_ffmpeg() -> None:
                 for info in archive.infolist():
                     name = Path(info.filename).name.lower()
                     if name in {"ffmpeg.exe", "ffprobe.exe"} and not info.is_dir():
+                        if info.file_size > 512 * 1024 * 1024:
+                            raise RuntimeError("Oversized executable in verified archive")
                         target = dest_dir / Path(info.filename).name
                         with archive.open(info) as source, target.open("wb") as handle:
                             shutil.copyfileobj(source, handle)

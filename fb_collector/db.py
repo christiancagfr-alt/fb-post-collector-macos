@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .config import DB_PATH
+from .credential_store import SECRET_SETTINGS, protect, reveal
 from .fields import DEFAULT_FIELDS, assign_default_write_columns, column_to_index, index_to_column, normalize_column
 
 
@@ -24,6 +25,7 @@ def connect():
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA secure_delete = ON")
             yield conn
             conn.commit()
         except BaseException:
@@ -719,10 +721,13 @@ def list_row_runs(run_id):
 def setting_get(key, default=""):
     with connect() as conn:
         row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
-        return row["value"] if row else default
+        value = row["value"] if row else default
+        return reveal(value) if key in SECRET_SETTINGS else value
 
 
 def setting_set(key, value):
+    if key in SECRET_SETTINGS:
+        value = protect(value)
     with connect() as conn:
         conn.execute(
             "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

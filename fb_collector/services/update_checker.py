@@ -1,5 +1,8 @@
 import os
 import platform
+import hashlib
+import hmac
+import tempfile
 import re
 import subprocess
 import sys
@@ -7,13 +10,14 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit, unquote
 
 import requests
 
 from ..config import APP_VERSION, DATA_DIR
 
 
-REPOSITORY = "secure-artifacts/fb-post-collector"
+REPOSITORY = "christiancagfr-alt/fb-post-collector-macos"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 CHECK_CACHE_SECONDS = 600
 _CACHE_LOCK = threading.Lock()
@@ -45,7 +49,7 @@ def preferred_assets(assets):
             continue
         url = str(asset.get("browser_download_url") or "")
         suffix = next((item for item in priority if name.lower().endswith(item)), "")
-        if not suffix or not url.startswith("https://github.com/"):
+        if not suffix or not valid_release_asset(name, url):
             continue
         output.append(
             {
@@ -53,9 +57,24 @@ def preferred_assets(assets):
                 "url": url,
                 "size": int(asset.get("size") or 0),
                 "kind": suffix.lstrip(".").upper(),
+                "digest": str(asset.get("digest") or ""),
             }
         )
     return sorted(output, key=lambda item: priority.get("." + item["kind"].lower(), 9))
+
+
+def valid_release_asset(name, url):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,180}\.(?:exe|msi|zip|dmg)", name, re.I):
+        return False
+    try:
+        parsed = urlsplit(url)
+        parts = unquote(parsed.path).split("/")
+        return (parsed.scheme == "https" and parsed.netloc == "github.com"
+                and not parsed.query and not parsed.fragment and len(parts) == 7
+                and "/".join(parts[1:5]) == REPOSITORY + "/releases/download"
+                and parts[5] not in {".", "..", ""} and parts[6] == name)
+    except ValueError:
+        return False
 
 
 def installer_asset(assets):
@@ -101,6 +120,8 @@ def start_auto_update():
         raise RuntimeError("当前已经是最新版本。")
     if not installer:
         raise RuntimeError("没有找到可自动安装的 EXE 安装包，请手动下载。")
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", installer.get("digest", "")):
+        raise RuntimeError("发布包缺少 SHA256 校验信息，已禁止自动执行，请手动核实发布来源。")
     with UPDATE_LOCK:
         if UPDATE_STATE["status"] in {"running", "restarting"}:
             raise RuntimeError("正在更新中，请稍候。")
@@ -119,27 +140,40 @@ def start_auto_update():
     return auto_update_status()
 
 
-def _download_installer(url, dest, label):
+def _download_installer(url, dest, label, digest):
+    if not valid_release_asset(dest.name, url) or not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+        raise RuntimeError("安装包来源或校验信息无效")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
+    descriptor, temporary = tempfile.mkstemp(prefix="update-", suffix=".part", dir=dest.parent)
+    os.close(descriptor)
+    tmp = Path(temporary)
+    checksum = hashlib.sha256()
     request = urllib.request.Request(url, headers={"User-Agent": f"FBPostCollector/{APP_VERSION}"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        total = int(response.headers.get("Content-Length") or 0)
-        read = 0
-        last = -1
-        with tmp.open("wb") as handle:
-            while True:
-                chunk = response.read(256 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                read += len(chunk)
-                if total:
-                    pct = min(99, int(read * 100 / total))
-                    if pct >= last + 5:
-                        last = pct
-                        _update_log(f"正在下载 {label}：{pct}%", progress=pct)
-    tmp.replace(dest)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            total = int(response.headers.get("Content-Length") or 0)
+            read = 0
+            last = -1
+            with tmp.open("wb") as handle:
+                while True:
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    read += len(chunk)
+                    if read > 2 * 1024 * 1024 * 1024:
+                        raise RuntimeError("安装包超过安全大小限制")
+                    handle.write(chunk)
+                    checksum.update(chunk)
+                    if total:
+                        pct = min(99, int(read * 100 / total))
+                        if pct >= last + 5:
+                            last = pct
+                            _update_log(f"正在下载 {label}：{pct}%", progress=pct)
+        if (total and read != total) or not hmac.compare_digest(checksum.hexdigest(), digest.split(":")[1].lower()):
+            raise RuntimeError("安装包 SHA256 或长度校验失败，已禁止执行")
+        tmp.replace(dest)
+    finally:
+        tmp.unlink(missing_ok=True)
     _update_log(f"安装包已下载：{dest.name}", progress=100)
     return dest
 
@@ -147,9 +181,11 @@ def _download_installer(url, dest, label):
 def _update_worker(installer, version):
     try:
         folder = DATA_DIR / "updates"
+        if not valid_release_asset(installer["name"], installer["url"]):
+            raise RuntimeError("安装包来源或文件名无效")
         dest = folder / installer["name"]
         _update_log(f"开始下载 {installer['name']}", progress=1, status="running")
-        _download_installer(installer["url"], dest, installer["name"])
+        _download_installer(installer["url"], dest, installer["name"], installer.get("digest", ""))
         with UPDATE_LOCK:
             UPDATE_STATE["installer_path"] = str(dest)
         _update_log("正在启动安装程序，软件即将自动重启", progress=100, status="restarting")
@@ -208,7 +244,7 @@ def check_for_update(force=False):
         "release_url": release_url,
         "assets": assets,
         "installer": installer_asset(assets),
-        "can_auto_update": bool(installer_asset(assets) and getattr(sys, "frozen", False)),
+        "can_auto_update": bool(installer_asset(assets) and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", installer_asset(assets).get("digest", "")) and getattr(sys, "frozen", False)),
         "frozen": bool(getattr(sys, "frozen", False)),
     }
     with _CACHE_LOCK:

@@ -2,11 +2,13 @@
 
 本项目是一个本地采集工具。启动后会打开本地网页面板，用“项目 + 任务”的方式配置 Facebook 贴文链接采集、Google Sheets 写回、字段排序、环境检测和运行历史。
 
-当前版本：`v1.4.11`
+当前 Mac 版本：`v1.4.18`
+
+本仓库发布安装包。请优先阅读 [功能说明](docs/FEATURE-GUIDE-v1.4.18.txt) 和 [更新说明](MAC_RELEASE_NOTES.txt)。安全审核报告仅在开发者本地保留，不随版本发布。以下保留的旧版开发说明并非当前 Mac 安装指南。
 
 ## 下载安装
 
-从 [GitHub Releases](https://github.com/secure-artifacts/fb-post-collector/releases) 下载 Windows 安装包或 zip。
+从 [个人仓库 GitHub Releases](https://github.com/christiancagfr-alt/fb-post-collector-macos/releases) 下载对应芯片的 Mac DMG。
 
 安装后启动软件：
 
@@ -18,7 +20,7 @@
 验证构建来源：
 
 ```powershell
-gh attestation verify FBPostCollector-v1.4.12-windows.zip --owner secure-artifacts
+gh attestation verify FBPostCollector-v1.4.18-macos-arm64.dmg --repo christiancagfr-alt/fb-post-collector-macos
 ```
 
 ## 启动

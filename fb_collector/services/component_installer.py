@@ -4,7 +4,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,78 +40,18 @@ WINGET_PACKAGES = {
     "yt_dlp": "yt-dlp.yt-dlp",
     "python": "Python.Python.3.12",
 }
-TESSDATA_URLS = {
-    "eng": [
-        "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata",
-        "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/eng.traineddata",
-        "https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata",
-    ],
-    "por": [
-        "https://github.com/tesseract-ocr/tessdata_fast/raw/main/por.traineddata",
-        "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/por.traineddata",
-        "https://github.com/tesseract-ocr/tessdata/raw/main/por.traineddata",
-    ],
-    "ara": [
-        "https://github.com/tesseract-ocr/tessdata_fast/raw/main/ara.traineddata",
-        "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/ara.traineddata",
-        "https://github.com/tesseract-ocr/tessdata/raw/main/ara.traineddata",
-    ],
-    "chi_sim": [
-        "https://github.com/tesseract-ocr/tessdata_fast/raw/main/chi_sim.traineddata",
-        "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/chi_sim.traineddata",
-        "https://github.com/tesseract-ocr/tessdata/raw/main/chi_sim.traineddata",
-    ],
-    "swa": [
-        "https://github.com/tesseract-ocr/tessdata_fast/raw/main/swa.traineddata",
-        "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/swa.traineddata",
-        "https://github.com/tesseract-ocr/tessdata/raw/main/swa.traineddata",
-    ],
-    "fra": [
-        "https://github.com/tesseract-ocr/tessdata_fast/raw/main/fra.traineddata",
-        "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/fra.traineddata",
-        "https://github.com/tesseract-ocr/tessdata/raw/main/fra.traineddata",
-    ],
-    "Latin": [
-        "https://github.com/tesseract-ocr/tessdata_fast/raw/main/script/Latin.traineddata",
-        "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/script/Latin.traineddata",
-        "https://github.com/tesseract-ocr/tessdata/raw/main/script/Latin.traineddata",
-    ],
-}
-LANGUAGE_COMPONENTS = {
-    "tessdata_swa": "swa",
-    "tessdata_fra": "fra",
-    "tessdata_latin": "Latin",
-}
-YT_DLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-FFMPEG_URLS = [
-    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-    "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
-]
-TESSERACT_MANUAL_LINKS = [
-    {
-        "label": "官方 Windows 64 位安装包",
-        "url": "https://github.com/tesseract-ocr/tesseract/releases/download/5.5.3/tesseract-ocr-w64-setup-5.5.3.20260724.exe",
-    },
-    {
-        "label": "官方 5.5.3 下载页面",
-        "url": "https://github.com/tesseract-ocr/tesseract/releases/tag/5.5.3",
-    },
-    {
-        "label": "UB Mannheim 安装说明",
-        "url": "https://github.com/UB-Mannheim/tesseract/wiki",
-    },
-]
-TESSERACT_SETUP_URLS = [
-    "https://github.com/tesseract-ocr/tesseract/releases/download/5.5.3/tesseract-ocr-w64-setup-5.5.3.20260724.exe",
-    "https://digi.bib.uni-mannheim.de/tesseract/tesseract-ocr-w64-setup-5.5.3.20260724.exe",
-    "https://digi.bib.uni-mannheim.de/tesseract/tesseract-ocr-w64-setup-5.5.0.20241111.exe",
-    "https://github.com/tesseract-ocr/tesseract/releases/download/5.5.0/tesseract-ocr-w64-setup-5.5.0.20241111.exe",
-    "https://digi.bib.uni-mannheim.de/tesseract/tesseract-ocr-w64-setup-5.4.0.20240606.exe",
-]
+from .component_manifest import (
+    TESSDATA_URLS, YT_DLP_URL, FFMPEG_URLS, TESSERACT_MANUAL_LINKS,
+    TESSERACT_SETUP_URLS, PYTHON_SETUP_URL, PIP_REQUIREMENT, WHISPER_REQUIREMENT,
+)
+from .verified_download import download_verified
+
 if sys.platform == "darwin":
-    TESSERACT_MANUAL_LINKS = [{"label": "Mac 组件安装：Homebrew", "url": "https://brew.sh"}]
-USER_AGENT = "Mozilla/5.0 FBPostCollector"
-PYTHON_SETUP_URL = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
+    TESSERACT_MANUAL_LINKS = [{"label": "Homebrew（macOS 组件安装）", "url": "https://brew.sh"}]
+
+LANGUAGE_COMPONENTS = {
+    "tessdata_swa": "swa", "tessdata_fra": "fra", "tessdata_latin": "Latin",
+}
 
 
 def now_text():
@@ -267,36 +206,19 @@ def writable_tessdata_dir(tesseract_path=""):
 
 
 def download_file(url, dest, label=""):
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
     name = label or dest.name
-    log_install(f"正在下载 {name}")
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        total = int(response.headers.get("Content-Length") or 0)
-        read = 0
-        last = -1
-        with tmp.open("wb") as handle:
-            while True:
-                chunk = response.read(256 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                read += len(chunk)
-                if total:
-                    pct = min(100, int(read * 100 / total))
-                    if pct >= last + 10 or pct >= 100:
-                        last = pct
-                        log_install(f"正在下载 {name}：{pct}%（{max(read // (1024 * 1024), 0)} MB）")
-    if total and read != total:
-        raise RuntimeError(f"{name} 下载不完整，请重试")
-    if dest.suffix.lower() == ".exe":
-        with tmp.open("rb") as handle:
-            if handle.read(2) != b"MZ":
-                raise RuntimeError(f"{name} 下载的不是 Windows 程序，可能收到错误网页")
-    tmp.replace(dest)
-    log_install(f"已保存 {name} -> {dest}")
-    return dest
+    log_install(f"正在下载并校验 {name}")
+    last = -1
+    def progress(read, total):
+        nonlocal last
+        if total:
+            percent = min(100, int(read * 100 / total))
+            if percent >= last + 10 or percent == 100:
+                last = percent
+                log_install(f"正在下载 {name}：{percent}%")
+    result = download_verified(url, dest, progress)
+    log_install(f"SHA256 校验通过：{name}")
+    return result
 
 
 def download_first(urls, dest, label=""):
@@ -322,7 +244,9 @@ def extract_exes_from_zip(zip_path, dest_dir, names):
             filename = Path(info.filename).name.lower()
             if filename not in wanted or filename in found:
                 continue
-            target = dest_dir / Path(info.filename).name
+            if info.file_size > 512 * 1024 * 1024:
+                raise RuntimeError("解压文件超过安全大小限制")
+            target = dest_dir / filename
             log_install(f"正在解压 {Path(info.filename).name}")
             with archive.open(info) as source, target.open("wb") as handle:
                 shutil.copyfileobj(source, handle)
@@ -378,6 +302,8 @@ def run_command(command, timeout=3600):
 
 
 def winget_install(package_id):
+    if package_id != WINGET_PACKAGES["python"]:
+        raise RuntimeError("固定版本下载失败，不再自动降级到未锁定的组件版本，请检查网络后重试")
     winget = shutil.which("winget")
     if not winget:
         raise RuntimeError("未检测到 winget，无法使用系统包管理器安装。")
@@ -388,6 +314,8 @@ def winget_install(package_id):
             "--exact",
             "--id",
             package_id,
+            "--version",
+            "3.12.10",
             "--scope",
             "user",
             "--silent",
@@ -674,11 +602,11 @@ def install_whisper():
         if completed.returncode != 0 or not venv_python.exists():
             return _result("whisper", False, completed.returncode, "创建虚拟环境失败\n" + "\n".join(notes))
     log_install("正在安装 openai-whisper（含 PyTorch，可能需要几分钟，请保持网络畅通）")
-    completed = run_command_logged([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], timeout=300)
+    completed = run_command_logged([str(venv_python), "-m", "pip", "install", "--upgrade", PIP_REQUIREMENT], timeout=300)
     notes.append(completed.stdout[-800:])
     if completed.returncode != 0:
         return _result("whisper", False, completed.returncode, "pip 准备失败，请检查网络后重试\n" + "\n".join(notes))
-    completed = run_command_logged([str(venv_python), "-m", "pip", "install", "--upgrade", "openai-whisper"], timeout=3600)
+    completed = run_command_logged([str(venv_python), "-m", "pip", "install", "--upgrade", WHISPER_REQUIREMENT], timeout=3600)
     notes.append(completed.stdout[-1500:])
     tools = detect_tools(force=True)
     success = completed.returncode == 0 and bool(tools["whisper"]["available"])

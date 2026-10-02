@@ -106,8 +106,10 @@ class DriveStorageTests(unittest.TestCase):
         credentials.to_json.return_value = 'NEW_TOKEN'
         flow = MagicMock()
         flow.run_local_server.return_value = credentials
-        with patch.object(drive.InstalledAppFlow, 'from_client_secrets_file', return_value=flow), patch.object(drive, '_build_service', return_value=service):
-            drive._login_worker('client.json')
+        client_path = Path(self.temp.name) / 'client.json'
+        drive.write_secret_file(client_path, json.dumps({'installed': {'client_id': 'test', 'client_secret': 'test'}}))
+        with patch.object(drive.InstalledAppFlow, 'from_client_config', return_value=flow), patch.object(drive, '_build_service', return_value=service):
+            drive._login_worker(str(client_path))
         self.assertEqual(drive.login_status()['status'], 'success')
         self.assertEqual(len(drive.accounts()), 2)
         profile = drive.accounts()[0]

@@ -50,6 +50,7 @@
       用于贴文、OCR 文本和音频文本翻译。密钥只保存在本机，不会显示在页面或写入运行日志。
       每个服务可添加多个密钥，软件会按请求轮询；当前密钥限额不足或调用失败时会自动尝试下一个。
       “自动选择”会优先使用已配置的 Gemini，其次 Groq，全部失败后再使用免费备用线路。
+      本地 Tesseract 只负责图片文字识别；上述翻译均需要联网，并非离线翻译。免费线路可能限流或额度不足。
     </p>
     <form method="post" class="row g-3" autocomplete="off">
       <label class="col-md-4 form-label">翻译服务
@@ -111,8 +112,9 @@
     <form method="post" class="row g-3 align-items-end">
       <label class="col-md-6 form-label">
         当前 Gyazo Access Token
-        <input class="form-control form-control-sm mt-1" name="gyazo_access_token" value="{{ gyazo_access_token }}" placeholder="用户自己的 Token，留空则使用默认 Token">
+        <input type="password" autocomplete="new-password" class="form-control form-control-sm mt-1" name="gyazo_access_token" value="" placeholder="{% if gyazo_configured %}已配置，留空保持不变{% else %}请输入 Token{% endif %}">
       </label>
+      <label class="col-12"><input type="checkbox" name="clear_gyazo_access_token" value="1"> 清除已保存的 Gyazo Token</label>
       <div class="col-12">
         <button class="btn btn-primary btn-sm" type="submit">保存</button>
       </div>
