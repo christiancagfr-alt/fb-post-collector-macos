@@ -167,6 +167,8 @@ def init_db():
         ensure_column(conn, "projects", "browser_account_ids_json", "TEXT NOT NULL DEFAULT '[]'")
         ensure_column(conn, "projects", "page_source_worksheet_name", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "projects", "page_output_worksheet_name", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "projects", "post_id_worksheet_name", "TEXT NOT NULL DEFAULT '贴文id'")
+        ensure_column(conn, "projects", "lookup_page_limit", "INTEGER NOT NULL DEFAULT 100")
         ensure_column(conn, "projects", "page_start_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "projects", "page_end_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "projects", "audio_min_like_count", "INTEGER NOT NULL DEFAULT 0")
@@ -253,7 +255,7 @@ def get_project(project_id):
 
 def create_project(name="新项目", project_type="post"):
     now = utc_now()
-    if project_type not in {"post", "page"}:
+    if project_type not in {"post", "page", "post_lookup"}:
         project_type = "post"
     with connect() as conn:
         cur = conn.execute(
@@ -261,7 +263,10 @@ def create_project(name="新项目", project_type="post"):
             (name, project_type, now, now),
         )
         project_id = cur.lastrowid
-        seed_fields(conn, project_id)
+        if project_type == "post_lookup":
+            conn.execute("UPDATE projects SET page_source_worksheet_name = '专页列表', "
+                         "page_output_worksheet_name = '采集结果', write_start_column = 'E' WHERE id = ?", (project_id,))
+        seed_fields(conn, project_id, "E" if project_type == "post_lookup" else "B")
         return project_id
 
 
@@ -345,6 +350,8 @@ def update_project(project_id, data):
         "worksheet_name",
         "page_source_worksheet_name",
         "page_output_worksheet_name",
+        "post_id_worksheet_name",
+        "lookup_page_limit",
         "page_start_at",
         "page_end_at",
         "link_column",

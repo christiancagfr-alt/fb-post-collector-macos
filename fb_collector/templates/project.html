@@ -12,7 +12,7 @@
         </label>
         <div class="col-md-4  form-label">项目类型
           <div class="form-control form-control-sm mt-1 bg-light">
-            {{ "专页项目" if project.project_type == "page" else "贴文项目" }}
+            {{ "贴文 ID 查找项目" if project.project_type == "post_lookup" else "专页项目" if project.project_type == "page" else "贴文项目" }}
           </div>
           <input type="hidden" name="project_type" id="project-type" value="{{ project.project_type or 'post' }}">
         </div>
@@ -133,6 +133,29 @@
     </div>
   </section>
 
+  {% if project.project_type == "post_lookup" %}
+  <section class="card shadow-sm mb-4 project-mode project-mode-post_lookup">
+    <div class="card-body">
+      <h2 class="h5 mb-3">贴文 ID 查找配置</h2>
+      <div class="alert alert-info py-2 small">三个分表位于上方同一个 Google 表格。两个输入分表均读取 A 列，第 1 行为表头、第 2 行起为数据，不修改输入表。专页链接使用带数字 ID 的 profile.php?id=… 或 /数字ID 格式。贴文 ID 请设为纯文本，避免长数字被表格舍入。</div>
+      <div class="row g-3">
+        <label class="col-md-4 form-label">专页链接分表名称
+          <input class="form-control mt-1" name="page_source_worksheet_name" value="{{ project.page_source_worksheet_name }}" required>
+        </label>
+        <label class="col-md-4 form-label">贴文 ID 分表名称（A 列）
+          <input class="form-control mt-1" name="post_id_worksheet_name" value="{{ project.post_id_worksheet_name }}" required>
+        </label>
+        <label class="col-md-4 form-label">独立结果分表名称
+          <input class="form-control mt-1" name="page_output_worksheet_name" value="{{ project.page_output_worksheet_name }}" required>
+        </label>
+        <label class="col-md-4 form-label">每个专页最多翻页次数
+          <input class="form-control mt-1" type="number" min="1" max="1000" name="lookup_page_limit" value="{{ project.lookup_page_limit }}" required>
+        </label>
+      </div>
+      <p class="small text-muted mt-3">运行时自动创建结果分表。A–D 列固定记录：查询贴文 ID、来源专页链接、来源专页名称、查找状态；下方采集字段从 E 列起配置。已成功的 ID 再次运行时跳过，未成功的会重试。账号按专页轮询，支持暂停与停止。达到翻页上限时只标记“搜索范围内未找到”，不代表该贴文不存在。</p>
+    </div>
+  </section>
+  {% else %}
   <section class="card shadow-sm mb-4 project-mode project-mode-page">
     <div class="card-body">
       <h2 class="h5 mb-3">专页项目配置</h2>
@@ -161,6 +184,7 @@
       </div>
     </div>
   </section>
+  {% endif %}
 
   <section class="card shadow-sm mb-4">
     <div class="card-body">

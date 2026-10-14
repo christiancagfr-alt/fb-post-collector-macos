@@ -4,6 +4,7 @@ from .fields import DEFAULT_FIELDS, normalize_column
 PROJECT_KEYS = (
     "name", "project_type", "spreadsheet_url", "spreadsheet_id", "worksheet_name",
     "page_source_worksheet_name", "page_output_worksheet_name", "page_start_at", "page_end_at",
+    "post_id_worksheet_name", "lookup_page_limit",
     "link_column", "header_row", "start_row", "end_row", "max_workers", "write_start_column",
     "processed_log_column", "skip_existing_write_data", "rerun_policy", "ocr_languages",
     "whisper_language", "audio_min_like_count",
@@ -27,7 +28,7 @@ def validate_import(payload):
     data = {key: source[key] for key in PROJECT_KEYS if key in source}
     if any(not isinstance(value, (str, int, bool)) for value in data.values()):
         raise ValueError("项目配置值必须是文字或数字")
-    if data.get("project_type") not in ("post", "page"):
+    if data.get("project_type") not in ("post", "page", "post_lookup"):
         raise ValueError("不支持的项目类型")
     if data.get("rerun_policy", "skip_done") not in ("skip_done", "overwrite", "retry_failed"):
         raise ValueError("不支持的重复运行策略")

@@ -334,6 +334,9 @@ def create_app():
                 raise ValueError("项目文件不能超过 1 MB")
             data, fields = validate_import(json.loads(content.decode("utf-8-sig")))
             data = normalize_project_form(data, [])
+            if data["project_type"] == "post_lookup":
+                from .post_lookup import validate_lookup_config
+                validate_lookup_config(data, fields)
         except (ValueError, TypeError, UnicodeError):
             flash("导入失败：文件格式或配置值无效，请使用本软件导出的项目 JSON（最大 1 MB）。", "danger")
             return redirect(url_for("index"))
@@ -376,12 +379,19 @@ def create_app():
         project = db.get_project(project_id)
         if not project:
             return redirect(url_for("index"))
-        data = normalize_project_form(dict(request.form), request.form.getlist("browser_account_ids"))
+        data = normalize_project_form(dict(request.form, project_type=project.get("project_type") or "post"), request.form.getlist("browser_account_ids"))
         data["project_type"] = project.get("project_type") or "post"
         if data.get("spreadsheet_url"):
             data["spreadsheet_id"] = extract_spreadsheet_id(data["spreadsheet_url"])
-        db.update_project(project_id, data)
         fields = json.loads(request.form.get("fields_json", "[]"))
+        if data["project_type"] == "post_lookup":
+            from .post_lookup import validate_lookup_config
+            try:
+                validate_lookup_config(data, fields)
+            except ValueError as exc:
+                flash(str(exc), "danger")
+                return redirect(url_for("project_edit", project_id=project_id))
+        db.update_project(project_id, data)
         if data.get("project_type") == "page":
             for field in fields:
                 if field.get("field_key") == "post_url":
@@ -928,6 +938,13 @@ def normalize_project_form(data, account_ids=None):
         data["end_row"] = 0
         data["max_workers"] = 1
         data["rerun_policy"] = data.get("rerun_policy") or "overwrite"
+    if data["project_type"] == "post_lookup":
+        data["header_row"] = 1
+        data["start_row"] = 2
+        data["write_start_column"] = "E"
+        data["lookup_page_limit"] = min(1000, max(1, normalize_non_negative_int(data.get("lookup_page_limit")) or 100))
+        for key, default in (("page_source_worksheet_name", "专页列表"), ("post_id_worksheet_name", "贴文id"), ("page_output_worksheet_name", "采集结果")):
+            data[key] = str(data.get(key) or default).strip()
     return data
 
 

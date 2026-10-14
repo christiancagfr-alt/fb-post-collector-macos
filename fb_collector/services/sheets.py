@@ -89,8 +89,36 @@ class SheetsClient:
         values = resp.get("values", [])
         rows = []
         for offset, row in enumerate(values):
-            rows.append({"row_number": start_row + offset, "url": row[0].strip() if row else ""})
+            rows.append({"row_number": start_row + offset, "url": str(row[0]).strip() if row else ""})
         return rows
+
+    def ensure_worksheet(self, spreadsheet_id, title, min_columns=26):
+        """Create a missing output tab; never replace or clear an existing tab."""
+        def find_sheet():
+            metadata = self._execute(
+                lambda: self._service().spreadsheets().get(
+                    spreadsheetId=spreadsheet_id, fields="sheets.properties"), "读取分表列表失败")
+            return next((item["properties"] for item in metadata.get("sheets", [])
+                         if item["properties"]["title"] == title), None)
+
+        existing = find_sheet()
+        if existing is None:
+            try:
+                self._execute(lambda: self._service().spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id, body={"requests": [{"addSheet": {"properties": {
+                        "title": title, "gridProperties": {"columnCount": max(26, min_columns)}}}}]}),
+                    "创建结果分表失败")
+                return
+            except SheetWriteError:
+                # A successful add may have lost its response, or another run created it.
+                existing = find_sheet()
+                if existing is None:
+                    raise
+        if existing.get("gridProperties", {}).get("columnCount", 0) < min_columns:
+            self._execute(lambda: self._service().spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body={"requests": [{"updateSheetProperties": {
+                    "properties": {"sheetId": existing["sheetId"], "gridProperties": {"columnCount": min_columns}},
+                    "fields": "gridProperties.columnCount"}}]}), "扩展结果分表列数失败")
 
     def read_column_values(self, spreadsheet_id, worksheet_name, column, start_row):
         return {

@@ -274,7 +274,10 @@ def run_project(project_id, task_id=None, policy_override="", run_id=None):
     for key in lock_keys:
         PROFILE_LOCKS[key] = True
     try:
-        if project.get("project_type") == "page":
+        if project.get("project_type") == "post_lookup":
+            from .post_lookup import run_lookup_project
+            run_lookup_project(project, run_id, counts)
+        elif project.get("project_type") == "page":
             run_page_project(project, run_id, task_id, counts)
         else:
             run_post_project(project, run_id, task_id, counts, policy_override)

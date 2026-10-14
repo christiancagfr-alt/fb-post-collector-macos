@@ -16,6 +16,7 @@
         <select class="form-select form-select-sm" name="project_type" required>
           <option value="post">贴文项目</option>
           <option value="page">专页项目</option>
+          <option value="post_lookup">贴文 ID 查找项目</option>
         </select>
       </div>
       <div class="col-auto">
@@ -29,9 +30,9 @@
         {% for project in projects %}
           <tr>
             <td>{{ project.name }}</td>
-            <td>{{ "专页项目" if project.project_type == "page" else "贴文项目" }}</td>
+            <td>{{ "贴文 ID 查找项目" if project.project_type == "post_lookup" else "专页项目" if project.project_type == "page" else "贴文项目" }}</td>
             <td class="mono">{{ project.spreadsheet_id }}</td>
-            <td>{{ project.page_output_worksheet_name if project.project_type == "page" else project.worksheet_name }}</td>
+            <td>{{ project.page_output_worksheet_name if project.project_type in ["page", "post_lookup"] else project.worksheet_name }}</td>
             <td class="text-center">
               <div class="d-flex gap-1 justify-content-center flex-wrap">
                 <a class="btn btn-primary btn-sm" href="{{ url_for('project_edit', project_id=project.id) }}">编辑</a>

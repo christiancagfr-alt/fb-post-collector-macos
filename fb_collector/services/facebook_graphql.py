@@ -606,6 +606,8 @@ def timeline_edges_and_page_info(payloads: list[dict[str, Any]]) -> tuple[list[d
     for payload in payloads:
         feed = nested(payload, "data.node.timeline_list_feed_units", {})
         if isinstance(feed, dict):
+            if isinstance(feed.get("page_info"), dict) and feed["page_info"]:
+                page_info = feed["page_info"]
             for edge in feed.get("edges") or []:
                 if isinstance(edge, dict) and isinstance(edge.get("node"), dict):
                     edges.append(edge)
@@ -656,6 +658,12 @@ def first_creation_time(story: dict[str, Any]) -> Any:
 
 
 def extract_story_fields(story: dict[str, Any]) -> dict[str, Any]:
+    try:
+        outer_tracking = json.loads(story.get("tracking") or "{}")
+    except (ValueError, TypeError):
+        outer_tracking = {}
+    if not isinstance(outer_tracking, dict):
+        outer_tracking = {}
     content_story = first_nested(
         story,
         [
@@ -760,6 +768,9 @@ def extract_story_fields(story: dict[str, Any]) -> dict[str, Any]:
         "captions_url": nested(video_media, "video_available_captions_locales.0.captions_url") if isinstance(video_media, dict) else "",
         "video_view_count": first_nested(video_media, ["feedback.video_view_count", "view_count"]) if isinstance(video_media, dict) else "",
         "graphql_source": "profile_timeline",
+        # Lookup must not identify a shared post by its attached original/video ID.
+        "lookup_post_id": first_value(story.get("post_id"), outer_tracking.get("top_level_post_id"), story.get("id")),
+        "lookup_post_url": first_value(story.get("permalink_url"), story.get("url")),
         "creation_time_unix": int(creation_time) if str(creation_time).isdigit() else "",
     }
 
