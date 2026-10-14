@@ -6,6 +6,7 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
+from smoke_form_http import verify_project_forms
 
 binary = Path("dist/FBPostCollector/FBPostCollector.exe").resolve()
 with tempfile.TemporaryDirectory(prefix="collector-smoke-") as directory:
@@ -31,6 +32,7 @@ with tempfile.TemporaryDirectory(prefix="collector-smoke-") as directory:
         for route in ("/", "/browser-accounts", "/drive-accounts", "/settings"):
             with urllib.request.urlopen(base + route, timeout=15) as response:
                 assert response.status == 200, route
+        verify_project_forms(base)
         print("Bundled Windows server and management pages passed")
     finally:
         process.terminate()

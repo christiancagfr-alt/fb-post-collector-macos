@@ -45,12 +45,12 @@ jobs:
           if (-not (Test-Path $compiler)) { throw 'Inno Setup is missing from the runner' }
           & $compiler FBPostCollector.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python build_msi.py --source dist/FBPostCollector --output dist/FBPostCollector-Setup-v1.4.19.msi
+          python build_msi.py --source dist/FBPostCollector --output dist/FBPostCollector-Setup-v1.4.20.msi
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item installer_output/FBPostCollector-Setup-v1.4.19.exe release/
-          Copy-Item dist/FBPostCollector-Setup-v1.4.19.msi release/
-          Compress-Archive -Path dist/FBPostCollector -DestinationPath release/FBPostCollector-v1.4.19-windows.zip
+          Copy-Item installer_output/FBPostCollector-Setup-v1.4.20.exe release/
+          Copy-Item dist/FBPostCollector-Setup-v1.4.20.msi release/
+          Compress-Archive -Path dist/FBPostCollector -DestinationPath release/FBPostCollector-v1.4.20-windows.zip
           Get-ChildItem release -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content release/SHA256-windows.txt -Encoding utf8
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
@@ -78,4 +78,4 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           test "$GH_REPO" = "christiancagfr-alt/fb-post-collector-macos"
-          gh release upload v1.4.19 release/*
+          gh release upload v1.4.20 release/*

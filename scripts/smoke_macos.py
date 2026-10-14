@@ -5,6 +5,7 @@ import signal
 import time
 import urllib.request
 from pathlib import Path
+from smoke_form_http import verify_project_forms
 
 binary = Path('dist/FBPostCollector.app/Contents/MacOS/FBPostCollector').resolve()
 process = subprocess.Popen([str(binary), '--server-only', '15888'])
@@ -23,6 +24,7 @@ try:
     for route in ('/', '/browser-accounts', '/drive-accounts'):
         with urllib.request.urlopen('http://127.0.0.1:15888' + route, timeout=15) as response:
             assert response.status == 200, route
+    verify_project_forms('http://127.0.0.1:15888')
     print('Bundled macOS server and management pages passed')
 finally:
     process.terminate()

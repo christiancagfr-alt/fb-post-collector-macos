@@ -33,6 +33,16 @@ class WebSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(response.headers["Referrer-Policy"], "same-origin")
+
+    def test_form_post_same_origin_metadata_and_port(self):
+        response = self.client.post("/", base_url="http://127.0.0.1:5199", headers={
+            "Origin": "http://127.0.0.1:5199", "Referer": "http://127.0.0.1:5199/",
+            "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate"})
+        self.assertEqual(response.status_code, 200)
+        for origin in ("null", "http://127.0.0.1:5200", "https://evil.example"):
+            self.assertEqual(self.client.post("/", base_url="http://127.0.0.1:5199",
+                headers={"Origin": origin, "Sec-Fetch-Site": "same-origin"}).status_code, 403)
 
     def test_upload_size_limit(self):
         self.assertEqual(self.client.post("/", data=b"x" * (2 * 1024 * 1024 + 1)).status_code, 413)

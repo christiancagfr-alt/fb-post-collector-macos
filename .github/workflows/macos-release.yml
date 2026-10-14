@@ -52,7 +52,7 @@ jobs:
           cp -R dist/FBPostCollector.app dmg-stage/
           ln -s /Applications dmg-stage/Applications
           cp MAC_INSTALL.txt dmg-stage/
-          hdiutil create -volname FBPostCollector -srcfolder dmg-stage -ov -format UDZO installer_output/FBPostCollector-v1.4.19-macos-${{ matrix.arch }}.dmg
+          hdiutil create -volname FBPostCollector -srcfolder dmg-stage -ov -format UDZO installer_output/FBPostCollector-v1.4.20-macos-${{ matrix.arch }}.dmg
           cd installer_output
           shasum -a 256 *.dmg > SHA256-${{ matrix.arch }}.txt
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
@@ -83,4 +83,4 @@ jobs:
         run: |
           test "$GH_REPO" = "christiancagfr-alt/fb-post-collector-macos"
           cp docs/FEATURE-GUIDE-v1.4.19.txt release-assets/
-          gh release upload v1.4.19 release-assets/*
+          gh release upload v1.4.20 release-assets/*
